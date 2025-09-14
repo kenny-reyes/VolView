@@ -1,4 +1,5 @@
 /// <reference types="vitest" />
+import { federation } from '@module-federation/vite';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { Plugin, defineConfig, normalizePath } from 'vite';
@@ -139,6 +140,14 @@ export default defineConfig({
         return null;
       },
     },
+    federation({
+      filename: 'remoteEntry.js',
+      name: 'volview',
+      exposes: {
+        './volview-app': './src/components/App.vue',
+      },
+      remotes: {},
+    }),
     replace({
       preventAssignment: true,
       // better sentry treeshaking
