@@ -3,15 +3,13 @@
     <div id="module-switcher">
       <v-tabs
         id="module-switcher-tabs"
-        v-model="selectedModule"
-        grow
+        v-model="selectedModuleIndex"
         icons-and-text
         show-arrows
       >
         <v-tab
           v-for="item in modules"
           :key="item.name"
-          :value="item.name"
           :data-testid="`module-tab-${item.name}`"
           :disabled="item.disabled"
         >
@@ -23,16 +21,15 @@
       </v-tabs>
     </div>
     <div id="module-container">
-      <v-window v-model="selectedModule" touchless class="module-window">
+      <v-window v-model="selectedModuleIndex" touchless class="fill-height">
         <v-window-item
           v-for="mod in modules"
           :key="mod.name"
-          :value="mod.name"
-          class="module-window-item"
+          class="fill-height"
         >
           <component
             :key="mod.name"
-            v-show="selectedModule === mod.name"
+            v-show="modules[selectedModuleIndex] === mod"
             :is="mod.component"
           />
         </v-window-item>
@@ -46,7 +43,6 @@
 import { Component, computed, defineComponent, ref, watch } from 'vue';
 
 import { ConnectionState, useServerStore } from '@/src/store/server';
-import { JobsModule, useProcessingJobsStore } from '@/src/processing';
 import DataBrowser from './DataBrowser.vue';
 import RenderingModule from './RenderingModule.vue';
 import AnnotationsModule from './AnnotationsModule.vue';
@@ -55,36 +51,25 @@ import ProbeView from './ProbeView.vue';
 import { useToolStore } from '../store/tools';
 import { Tools } from '../store/tools/types';
 
-type Module = {
+interface Module {
   name: string;
   icon: string;
   component: Component;
   disabled?: boolean;
-};
+}
 
-const CoreModules: Module[] = [
-  {
-    name: 'Data',
-    icon: 'database',
-    component: DataBrowser,
-  },
-  {
-    name: 'Annotations',
-    icon: 'pencil',
-    component: AnnotationsModule,
-  },
+const Modules: Module[] = [
   {
     name: 'Rendering',
     icon: 'cube',
     component: RenderingModule,
   },
+  {
+    name: 'Annotations',
+    icon: 'pencil',
+    component: AnnotationsModule,
+  }
 ];
-
-const RemoteModule: Module = {
-  name: 'Remote',
-  icon: 'server-network',
-  component: ServerModule,
-};
 
 const autoSwitchToAnnotationsTools = [
   Tools.Rectangle,
@@ -97,43 +82,28 @@ export default defineComponent({
   name: 'ModulePanel',
   components: { ProbeView },
   setup() {
-    const selectedModule = ref(CoreModules[0].name);
+    const selectedModuleIndex = ref(0);
 
     const toolStore = useToolStore();
     watch(
       () => toolStore.currentTool,
       (newTool) => {
         if (autoSwitchToAnnotationsTools.includes(newTool))
-          selectedModule.value = 'Annotations';
+          selectedModuleIndex.value = 1;
       }
     );
 
     const serverStore = useServerStore();
-
-    // Jobs tab appears only after a provider registers.
-    const providersStore = useProcessingJobsStore();
-    const jobsModule = computed(() =>
-      providersStore.configs.size > 0
-        ? ({ name: 'Jobs', icon: 'creation', component: JobsModule } as Module)
-        : null
-    );
-
     const modules = computed(() => {
-      const filtered = [
-        ...CoreModules,
-        ...(jobsModule.value ? [jobsModule.value] : []),
-        RemoteModule,
-      ];
-
       if (!serverStore.url) {
-        return filtered.filter((m) => m.name !== 'Remote');
+        return Modules.filter((m) => m.name !== 'Remote');
       }
 
       if (serverStore.connState === ConnectionState.Connected) {
-        return filtered;
+        return Modules;
       }
 
-      return filtered.map((m) => {
+      return Modules.map((m) => {
         if (m.name === 'Remote') {
           return { ...m, disabled: true };
         }
@@ -141,23 +111,8 @@ export default defineComponent({
       });
     });
 
-    watch(
-      modules,
-      (available) => {
-        const selected = available.find(
-          (item) => item.name === selectedModule.value
-        );
-        if (!selected || selected.disabled) {
-          selectedModule.value =
-            available.find((item) => !item.disabled)?.name ??
-            CoreModules[0].name;
-        }
-      },
-      { immediate: true }
-    );
-
     return {
-      selectedModule,
+      selectedModuleIndex,
       modules,
     };
   },
@@ -183,14 +138,7 @@ export default defineComponent({
 #module-container {
   position: relative;
   flex: 2;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-
-.module-window,
-.module-window-item {
-  min-height: 100%;
+  overflow: auto;
 }
 
 .module-text {
@@ -206,9 +154,8 @@ export default defineComponent({
   align-items: center;
 }
 
-#module-switcher-tabs :deep(.v-tab.v-tab) {
-  flex: 1 1 0;
-  min-width: 0;
+#module-switcher-tabs :deep(.v-slide-group__content) {
+  justify-content: center;
 }
 
 #module-switcher-tabs
