@@ -144,11 +144,21 @@ export const useDatasetStore = defineStore('dataset', () => {
   const primaryImageID = primarySelection;
 
   const primaryDataset = computed<vtkImageData | null>(() => {
-    return (
-      (primaryImageID.value &&
-        imageCacheStore.imageById[primaryImageID.value].getVtkImageData()) ||
-      null
-    );
+    try {
+      if (!primaryImageID.value) {
+        return null;
+      }
+
+      const cacheEntry = imageCacheStore.imageById[primaryImageID.value];
+      if (!cacheEntry || typeof cacheEntry.getVtkImageData !== 'function') {
+        return null;
+      }
+
+      return cacheEntry.getVtkImageData() || null;
+    } catch (e) {
+      console.warn('MVET VolView: error calculating primaryDataset', e);
+      return null;
+    }
   });
 
   const idsAsSelections = computed(() => {
