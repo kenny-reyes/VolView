@@ -149,10 +149,12 @@ export const useImageStatsStore = defineStore('image-stats', () => {
     );
 
     const triggerAutoRangeComputation = (image: vtkImageData) => {
+      console.time(`[PERF] autoRange computation for ${id}`);
       autoRangeComputations[id] = computeAutoRangeValues(image);
 
       autoRangeComputations[id]
         .then((autoValues) => {
+          console.timeEnd(`[PERF] autoRange computation for ${id}`);
           if (imageCacheStore.imageIds.includes(id)) {
             // not deleted yet, save values
             internalSetAutoRangeValues(id, autoValues);
@@ -173,8 +175,10 @@ export const useImageStatsStore = defineStore('image-stats', () => {
         });
     };
 
+    const imageStatusRef = computed(() => imageCacheStore.imageStatus[id]);
+
     watch(
-      [imageData, isImageLoading],
+      [imageData, isImageLoading, imageStatusRef],
       () => {
         if (
           isImageLoading.value ||
@@ -183,6 +187,9 @@ export const useImageStatsStore = defineStore('image-stats', () => {
           (stats[id] && stats[id].autoRangeValues)
         )
           return;
+        // Stack-mode: defer autoRange until all chunks are loaded (status = 'complete')
+        // Without this, autoRange processes the entire 125MB buffer (mostly empty) taking ~44s
+        if (imageStatusRef.value === 'incomplete') return;
         triggerAutoRangeComputation(imageData.value);
       },
       { immediate: true }

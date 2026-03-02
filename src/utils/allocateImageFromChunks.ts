@@ -12,6 +12,7 @@ const PixelSpacingTag = NAME_TO_TAG.get('PixelSpacing')!;
 const RowsTag = NAME_TO_TAG.get('Rows')!;
 const ColumnsTag = NAME_TO_TAG.get('Columns')!;
 const BitsStoredTag = NAME_TO_TAG.get('BitsStored')!;
+const BitsAllocatedTag = NAME_TO_TAG.get('BitsAllocated')!;
 const PixelRepresentationTag = NAME_TO_TAG.get('PixelRepresentation')!;
 const SamplesPerPixelTag = NAME_TO_TAG.get('SamplesPerPixel')!;
 const RescaleIntercept = NAME_TO_TAG.get('RescaleIntercept')!;
@@ -80,7 +81,13 @@ export function allocateImageFromChunks(sortedChunks: Chunk[]) {
   const pixelSpacing = toVec(meta.get(PixelSpacingTag));
   const rows = Number(meta.get(RowsTag) ?? 0);
   const columns = Number(meta.get(ColumnsTag) ?? 0);
-  const bitsStored = Number(meta.get(BitsStoredTag) ?? 0);
+  // DEBUG: inspect metadata values
+  console.log('[DEBUG allocateImageFromChunks] metadata size:', meta.size);
+  console.log('[DEBUG allocateImageFromChunks] BitsAllocated raw:', JSON.stringify(meta.get(BitsAllocatedTag)));
+  console.log('[DEBUG allocateImageFromChunks] BitsStored raw:', JSON.stringify(meta.get(BitsStoredTag)));
+  const bitsAllocated = Number(meta.get(BitsAllocatedTag)) || 16;
+  const bitsStored = Number(meta.get(BitsStoredTag)) || bitsAllocated;
+  console.log('[DEBUG allocateImageFromChunks] bitsAllocated:', bitsAllocated, 'bitsStored:', bitsStored);
   const pixelRepresentation = Number(meta.get(PixelRepresentationTag));
   const samplesPerPixel = Number(meta.get(SamplesPerPixelTag) ?? 1);
   const rescaleIntercept = Number(meta.get(RescaleIntercept) ?? 0);
@@ -109,6 +116,13 @@ export function allocateImageFromChunks(sortedChunks: Chunk[]) {
   const pixelData = new TypedArrayCtor(
     rows * columns * slices * samplesPerPixel
   );
+
+  // Stack-mode: fill with minimum value so unloaded slices render as black
+  // instead of gray (zeros = water density in HU = gray in CT window/level)
+  const isSigned = pixelRepresentation === 1;
+  if (isSigned) {
+    pixelData.fill(-(2 ** (bitsStored - 1)));
+  }
 
   const image = vtkImageData.newInstance();
   image.setExtent([0, columns - 1, 0, rows - 1, 0, slices - 1]);

@@ -80,6 +80,7 @@ export default class DicomChunkImage
   private thumbnailCache: WeakMap<Chunk, Promise<unknown>>;
   private events: Emitter<ChunkImageEvents>;
   private chunkStatus: ChunkStatus[];
+  private stackModeInitialIndices: Set<number> | null;
 
   public segBuildInfo:
     | (JsonCompatible & ReadOverlappingSegmentationMeta)
@@ -99,6 +100,7 @@ export default class DicomChunkImage
     this.thumbnailCache = new WeakMap();
     this.events = mitt();
     this.segBuildInfo = null;
+    this.stackModeInitialIndices = null;
 
     this.addEventListener('loading', (loading) => {
       this.loading.value = loading;
@@ -153,11 +155,55 @@ export default class DicomChunkImage
     this.thumbnailCache = new WeakMap();
   }
 
+  /**
+   * Stack-mode loading: only decode the initial visible slices (first, middle, last)
+   * for instant 2D display. Call loadAllChunks() to decode the full volume for 3D.
+   */
   startLoad() {
-    this.chunks.forEach((chunk) => {
+    console.time('[PERF] Total chunk loading');
+    const total = this.chunks.length;
+    console.log(`[PERF] startLoad (stack-mode): ${total} chunks, loading initial slices only`);
+
+    if (total === 0) return;
+
+    // Load first, middle, and last slices for the 3 orthogonal 2D views
+    const middle = Math.floor(total / 2);
+    const initialIndices = [...new Set([0, middle, total - 1])];
+    this.stackModeInitialIndices = new Set(initialIndices);
+
+    initialIndices.forEach((idx) => {
+      this.chunks[idx].loadData();
+    });
+
+    this.events.emit('loading', true);
+  }
+
+  /**
+   * Load ALL remaining chunks to build the full 3D volume.
+   * Call this when the user activates a 3D view.
+   */
+  loadAllChunks() {
+    const unloaded = this.chunks.filter(
+      (chunk) => chunk.state === ChunkState.MetaOnly
+    );
+    if (unloaded.length === 0) return;
+
+    console.log(`[PERF] loadAllChunks: loading ${unloaded.length} remaining chunks`);
+    unloaded.forEach((chunk) => {
       chunk.loadData();
     });
-    this.events.emit('loading', true);
+  }
+
+  /**
+   * Load a specific chunk by index (for on-demand slice scrolling).
+   */
+  loadChunkByIndex(index: number) {
+    if (index >= 0 && index < this.chunks.length) {
+      const chunk = this.chunks[index];
+      if (chunk.state === ChunkState.MetaOnly) {
+        chunk.loadData();
+      }
+    }
   }
 
   stopLoad() {
@@ -168,6 +214,7 @@ export default class DicomChunkImage
   }
 
   async addChunks(chunks: Chunk[]) {
+    console.time('[PERF] addChunks total');
     this.unregisterChunkListeners();
 
     const existingIds = new Set(this.chunks.map((chunk) => getChunkId(chunk)));
@@ -178,11 +225,13 @@ export default class DicomChunkImage
       this.chunks.push(chunk);
     });
 
+    console.time('[PERF] loadMeta + splitAndSort');
     await Promise.all(chunks.map((chunk) => chunk.loadMeta()));
     const chunksByVolume = await splitAndSort(
       this.chunks,
       (chunk) => chunk.metaBlob!
     );
+    console.timeEnd('[PERF] loadMeta + splitAndSort');
     const volumes = Object.values(chunksByVolume);
     if (volumes.length !== 1)
       throw new Error('Did not get just a single volume!');
@@ -210,8 +259,11 @@ export default class DicomChunkImage
     this.processNewChunks(newChunks);
 
     if (this.getModality() !== 'SEG') {
+      console.time('[PERF] reallocateImage');
       this.reallocateImage();
+      console.timeEnd('[PERF] reallocateImage');
     }
+    console.timeEnd('[PERF] addChunks total');
   }
 
   getThumbnail(strategy: ThumbnailStrategy): Promise<any> {
@@ -326,17 +378,22 @@ export default class DicomChunkImage
   }
 
   private async onRegularChunkHasData(chunkIndex: number) {
+    const chunkStart = performance.now();
     const chunk = this.chunks[chunkIndex];
     if (!chunk.dataBlob) throw new Error('Chunk does not have data');
+
+    const t0 = performance.now();
     const result = await readImage(
       new File([chunk.dataBlob], `file-${chunkIndex}.dcm`),
       {
         webWorker: getWorker(),
       }
     );
+    const readTime = performance.now() - t0;
 
     if (!result.image.data) throw new Error('No data read from chunk');
 
+    const t1 = performance.now();
     const scalars = this.vtkImageData.value.getPointData().getScalars();
     const pixelData = scalars.getData() as TypedArray;
 
@@ -344,12 +401,14 @@ export default class DicomChunkImage
     const offset =
       dims[0] * dims[1] * scalars.getNumberOfComponents() * chunkIndex;
     pixelData.set(result.image.data as TypedArray, offset);
+    const copyTime = performance.now() - t1;
 
     const rangeAlreadyInitialized = this.chunkStatus.some(
       (status) => status === ChunkStatus.Loaded
     );
 
     // update the data range
+    const t2 = performance.now();
     const chunkDataRange: Array<[number, number]> = [];
     for (let comp = 0; comp < scalars.getNumberOfComponents(); comp++) {
       const { min, max } = fastComputeRange(
@@ -366,6 +425,7 @@ export default class DicomChunkImage
       scalars.setRange({ min: newMin, max: newMax }, comp);
     }
     scalars.modified(); // so image-stats will trigger update of range
+    const rangeTime = performance.now() - t2;
 
     chunk.setUserData(DATA_RANGE_KEY, chunkDataRange);
 
@@ -377,6 +437,17 @@ export default class DicomChunkImage
     this.onChunksUpdated();
 
     this.vtkImageData.value.modified();
+    const totalChunkTime = performance.now() - chunkStart;
+
+    // Log every 100th chunk to avoid flooding, plus first and last
+    const loadedCount = this.chunkStatus.filter(s => s === ChunkStatus.Loaded).length;
+    if (chunkIndex === 0 || chunkIndex === this.chunks.length - 1 || chunkIndex % 100 === 0) {
+      console.log(`[PERF] chunk ${chunkIndex}/${this.chunks.length}: readImage=${readTime.toFixed(0)}ms copy=${copyTime.toFixed(0)}ms range=${rangeTime.toFixed(0)}ms total=${totalChunkTime.toFixed(0)}ms (${loadedCount}/${this.chunks.length} loaded)`);
+    }
+    if (loadedCount === this.chunks.length) {
+      console.timeEnd('[PERF] Total chunk loading');
+      console.log(`[PERF] ALL ${this.chunks.length} chunks loaded!`);
+    }
   }
 
   private onChunkErrored(chunkIndex: number, err: unknown) {
@@ -399,6 +470,20 @@ export default class DicomChunkImage
   private onChunksUpdated() {
     const status = this.computeStatus();
     this.events.emit('status', status);
+
+    // Stack-mode: dismiss loading spinner once initial slices are ready
+    if (this.stackModeInitialIndices && this.stackModeInitialIndices.size > 0) {
+      const initialReady = [...this.stackModeInitialIndices].every(
+        (idx) => this.chunkStatus[idx] === ChunkStatus.Loaded
+      );
+      if (initialReady) {
+        console.log('[PERF] Stack-mode: initial slices ready — dismissing loading spinner');
+        this.stackModeInitialIndices = null; // Only fire once
+        this.events.emit('loading', false);
+        return;
+      }
+    }
+
     if (status === 'complete') {
       this.events.emit('loading', false);
     }

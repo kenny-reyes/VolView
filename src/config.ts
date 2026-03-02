@@ -110,12 +110,17 @@ export const DefaultViewSpec = InitViewSpecs[InitViewIDs.Axial];
 /**
  * The default layout.
  */
-export const DefaultLayoutName = 'Quad View';
+export const DefaultLayoutName = 'Three Views';
 
 /**
  * Defines the default layouts.
  */
 export const Layouts: Record<string, Layout> = [
+  {
+    name: 'Three Views',
+    direction: LayoutDirection.H,
+    items: [InitViewIDs.Coronal, InitViewIDs.Sagittal, InitViewIDs.Axial],
+  },
   {
     name: 'Axial Only',
     direction: LayoutDirection.H,

@@ -158,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, toRefs, computed } from 'vue';
+import { ref, toRefs, computed, watch } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import { LPSAxisDir } from '@/src/types/lps';
@@ -196,6 +196,7 @@ import vtkMouseCameraTrackballPanManipulator from '@kitware/vtk.js/Interaction/M
 import vtkMouseCameraTrackballZoomToMouseManipulator from '@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomToMouseManipulator';
 import { useResetViewsEvents } from '@/src/components/tools/ResetViews.vue';
 import { onVTKEvent } from '@/src/composables/onVTKEvent';
+import { useImageCacheStore } from '@/src/store/image-cache';
 
 interface Props extends LayoutViewProps {
   viewDirection: LPSAxisDir;
@@ -250,6 +251,23 @@ const segmentations = computed(() => {
   if (!currentImageID.value) return [];
   const store = useSegmentGroupStore();
   return store.orderByParent[currentImageID.value];
+});
+
+// --- Stack-mode: on-demand chunk loading when scrolling ---
+watch(currentSlice, (newSlice) => {
+  if (!currentImageID.value || newSlice == null) return;
+  try {
+    const store = useImageCacheStore();
+    const image = store.imageById[currentImageID.value] as any;
+    if (image?.loadChunkByIndex) {
+      const PREFETCH_RANGE = 3;
+      for (let i = newSlice - PREFETCH_RANGE; i <= newSlice + PREFETCH_RANGE; i++) {
+        image.loadChunkByIndex(i);
+      }
+    }
+  } catch {
+    // Image cache not available in this context
+  }
 });
 
 // --- selection points --- //

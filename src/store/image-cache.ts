@@ -73,7 +73,7 @@ export const useImageCacheStore = defineStore('image-cache', () => {
    */
   function addProgressiveImage(
     data: ProgressiveImage,
-    options: { id?: string } = {}
+    options: { id?: string; autoStart?: boolean } = {}
   ): string {
     const id = options.id ?? idStore.nextId();
     if (id in imageById) return id;
@@ -84,7 +84,9 @@ export const useImageCacheStore = defineStore('image-cache', () => {
     imageIds.value.push(id);
 
     registerListeners(id);
-    data.startLoad();
+    if (options.autoStart !== false) {
+      data.startLoad();
+    }
     return id;
   }
 

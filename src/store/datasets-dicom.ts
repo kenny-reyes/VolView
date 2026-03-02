@@ -188,7 +188,9 @@ export const useDICOMStore = defineStore('dicom', {
           }
 
           await image.addChunks(sortedChunks);
-          imageCacheStore.addProgressiveImage(image, { id });
+          imageCacheStore.addProgressiveImage(image, { id, autoStart: false });
+          // Stack-mode: manually trigger startLoad which only loads 3 initial slices
+          image.startLoad();
 
           // update database
           const metaPairs = image.getDicomMetadata();
