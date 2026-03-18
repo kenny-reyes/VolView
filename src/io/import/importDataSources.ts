@@ -88,6 +88,7 @@ async function importDicomChunkSources(sources: ChunkSource[]) {
 export async function importDataSources(
   dataSources: DataSource[]
 ): Promise<ImportDataSourcesResult[]> {
+  performance.mark('volview-import-start')
   const cleanupHandlers: Array<() => void> = [];
   const onCleanup = (fn: () => void) => {
     cleanupHandlers.push(fn);
@@ -178,9 +179,11 @@ export async function importDataSources(
   /* eslint-enable no-await-in-loop */
 
   cleanup();
+  performance.mark('volview-import-pipeline-end')
 
   results.push(...importConfigs(configResults));
 
+  performance.mark('volview-importChunks-start')
   results.push(
     ...(await importDicomChunkSources(
       chunkSources.filter(
@@ -189,12 +192,14 @@ export async function importDataSources(
       )
     ))
   );
+  performance.mark('volview-importChunks-end')
 
   // save data sources
   useDatasetStore().addDataSources(
     results.filter((result): result is LoadableResult => result.type === 'data')
   );
 
+  performance.mark('volview-import-end')
   return results;
 }
 

@@ -172,6 +172,7 @@ export const useDICOMStore = defineStore('dicom', {
   }),
   actions: {
     async importChunks(chunks: Chunk[]) {
+      performance.mark('volview-importChunks-splitStart')
       const imageCacheStore = useImageCacheStore();
 
       // split into groups
@@ -179,6 +180,7 @@ export const useDICOMStore = defineStore('dicom', {
         chunks,
         (chunk) => chunk.metaBlob!
       );
+      performance.mark('volview-importChunks-splitEnd')
 
       await Promise.all(
         Object.entries(chunksByVolume).map(async ([id, sortedChunks]) => {
@@ -228,6 +230,7 @@ export const useDICOMStore = defineStore('dicom', {
           image.setName(getDisplayName(volumeInfo));
         })
       );
+      performance.mark('volview-importChunks-processEnd')
 
       return chunksByVolume;
     },

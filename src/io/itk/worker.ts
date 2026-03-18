@@ -50,7 +50,15 @@ export function terminateWorkers() {
 }
 
 export async function initItkWorker() {
-  await Promise.all([ensureWorker(), ensureDicomSeriesWorkerPool()]);
+  // ACCION 3: Medir init-worker aislado
+  performance.mark('init-worker-start')
+  performance.mark('init-worker-ensureWorker-start')
+  await ensureWorker()
+  performance.mark('init-worker-ensureWorker-end')
+  performance.mark('init-worker-ensurePool-start')
+  ensureDicomSeriesWorkerPool()
+  performance.mark('init-worker-ensurePool-end')
+  performance.mark('init-worker-preload-start')
 
   // preload
   try {
@@ -61,6 +69,20 @@ export async function initItkWorker() {
   try {
     await readImage(new File([], 'a.dcm'));
   } catch (err) {
+    // ignore
+  }
+  performance.mark('init-worker-preload-end')
+  performance.mark('init-worker-end')
+  try {
+    performance.measure('init-worker-total', 'init-worker-start', 'init-worker-end')
+    performance.measure('init-worker-ensureWorker', 'init-worker-ensureWorker-start', 'init-worker-ensureWorker-end')
+    performance.measure('init-worker-ensurePool', 'init-worker-ensurePool-start', 'init-worker-ensurePool-end')
+    performance.measure('init-worker-preload', 'init-worker-preload-start', 'init-worker-preload-end')
+    const m = performance.getEntriesByType('measure').filter((e) => e.name.startsWith('init-worker-')).slice(-4)
+    console.group('[ACCION 3] init-worker aislado')
+    m.forEach((e) => console.log(`${e.name}: ${(e.duration / 1000).toFixed(2)}s`))
+    console.groupEnd()
+  } catch {
     // ignore
   }
 }

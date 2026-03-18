@@ -13,6 +13,7 @@ import { DataSource } from '@/src/io/import/dataSource';
  */
 const extractArchive: ImportHandler = async (dataSource) => {
   if (isArchive(dataSource)) {
+    performance.mark('volview-extractArchive-start')
     const files = await extractFilesFromZip(dataSource.file);
     const newSources = files.map((entry): DataSource => {
       return {
@@ -26,6 +27,7 @@ const extractArchive: ImportHandler = async (dataSource) => {
         },
       };
     });
+    performance.mark('volview-extractArchive-end')
     return asIntermediateResult(newSources);
   }
   return Skip;

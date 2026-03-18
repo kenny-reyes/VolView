@@ -22,4 +22,15 @@ const itkConfig = {
   pipelinesUrl: fullUrl('/itk/pipelines'),
 };
 
+// ACCION 5: Verificar puerto/servidor itk (log en dev para comparar web vs Electron)
+if (import.meta.env.DEV) {
+  const env = typeof navigator !== 'undefined' && navigator.userAgent?.toLowerCase().includes('electron') ? 'Electron' : 'Web'
+  console.log(`[ACCION 5] itk URLs (${env}):`, {
+    origin: typeof window !== 'undefined' ? window.location.origin : 'N/A',
+    port: typeof window !== 'undefined' ? window.location.port : 'N/A',
+    pipelineWorkerUrl: itkConfig.pipelineWorkerUrl,
+    pipelinesUrl: itkConfig.pipelinesUrl
+  })
+}
+
 export default itkConfig;
