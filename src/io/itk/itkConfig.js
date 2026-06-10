@@ -1,18 +1,6 @@
 const fullUrl = (relative) => {
-  // In development, detect the current port automatically
-  if (import.meta.env.DEV) {
-    const currentPort = window.location.port || '3000';
-    return `http://localhost:${currentPort}${relative}`;
-  }
-
-  // Production: use document location
-  const u = new URL(document.location);
-  const origin = u.origin;
-  const pathParts = u.pathname.split('/');
-  pathParts.pop();
-
-  const url = origin + pathParts.join('/') + relative;
-  return url;
+  const origin = window.location.origin;
+  return `${origin}${relative}`;
 };
 
 const itkConfig = {
