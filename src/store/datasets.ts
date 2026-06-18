@@ -212,6 +212,8 @@ export const useDatasetStore = defineStore('dataset', () => {
     imageStore.deleteData(id);
 
     layersStore.remove(id);
+
+    loadedData.value = loadedData.value.filter((d) => d.dataID !== id);
   };
 
   const removeAll = () => {
