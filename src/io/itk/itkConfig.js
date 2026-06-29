@@ -1,4 +1,11 @@
 const fullUrl = (relative) => {
+  const isFileProtocol = window.location.protocol === 'file:';
+
+  if (isFileProtocol) {
+    const relativePath = relative.replace(/^\/+/, '');
+    return new URL(relativePath, document.baseURI).href;
+  }
+
   const origin = window.location.origin;
   return `${origin}${relative}`;
 };
