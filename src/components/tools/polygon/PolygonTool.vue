@@ -19,7 +19,7 @@
       :tool-store="activeToolStore"
       v-slot="{ context }"
     >
-      <v-list-item @click.stop>
+      <v-list-item v-if="!isCurrentImageCine" @click.stop>
         <template #prepend>
           <v-icon>mdi-grid</v-icon>
         </template>
@@ -92,6 +92,7 @@ import { Tools } from '@/src/store/tools/types';
 import { getLPSAxisFromDir } from '@/src/utils/lps';
 import { LPSAxisDir } from '@/src/types/lps';
 import { usePolygonStore } from '@/src/store/tools/polygons';
+import { useRectangleStore } from '@/src/store/tools/rectangles';
 import {
   useContextMenu,
   useCurrentTools,
@@ -100,22 +101,25 @@ import {
 } from '@/src/composables/annotationTool';
 import AnnotationContextMenu from '@/src/components/tools/AnnotationContextMenu.vue';
 import AnnotationInfo from '@/src/components/tools/AnnotationInfo.vue';
-import { useFrameOfReference } from '@/src/composables/useFrameOfReference';
 import { actionToKey } from '@/src/composables/useKeyboardShortcuts';
 import { Maybe } from '@/src/types';
-import { useSliceInfo } from '@/src/composables/useSliceInfo';
+import { useViewLocator } from '@/src/composables/useViewLocator';
+import { locatorPatch } from '@/src/core/annotations/locator';
 import { useMagicKeys, watchImmediate } from '@vueuse/core';
 import { fillPoly } from '@thi.ng/rasterize';
 import type { IGrid2D } from '@thi.ng/api';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import type { Vector2, Vector3 } from '@kitware/vtk.js/types';
 import { containsPoint } from '@kitware/vtk.js/Common/DataModel/BoundingBox';
+import { convertSliceIndex } from '@/src/utils/imageSpace';
+import { getLPSDirections } from '@/src/utils/lps';
 import { type ToolID } from '@/src/types/annotation-tool';
 import PolygonWidget2D from '@/src/components/tools/polygon/PolygonWidget2D.vue';
 import { usePaintToolStore } from '@/src/store/tools/paint';
 import { useSegmentGroupStore } from '@/src/store/segmentGroups';
 import ColorDot from '@/src/components/ColorDot.vue';
 import { SegmentMask } from '@/src/types/segment';
+import { isCineImage } from '@/src/core/cine/isCineImage';
 
 const useActiveToolStore = usePolygonStore;
 const toolType = Tools.Polygon;
@@ -175,9 +179,7 @@ export default defineComponent({
     const activeToolStore = useActiveToolStore();
     const { activeLabel } = storeToRefs(activeToolStore);
 
-    const sliceInfo = useSliceInfo(viewId, imageId);
-    const slice = computed(() => sliceInfo.value?.slice ?? 0);
-    const sliceAxis = computed(() => sliceInfo.value?.axisIndex ?? 0);
+    const { locator, frame, slice } = useViewLocator(viewId, imageId);
 
     const { metadata: imageMetadata } = useImage(imageId);
     const isToolActive = computed(() => toolStore.currentTool === toolType);
@@ -185,20 +187,13 @@ export default defineComponent({
 
     // --- active tool management --- //
 
-    const frameOfReference = useFrameOfReference(
-      viewDirection,
-      slice,
-      imageMetadata
-    );
-
     const placingTool = usePlacingAnnotationTool(
       activeToolStore,
       computed(() => {
         if (!imageId.value) return {};
         return {
           imageID: imageId.value,
-          frameOfReference: frameOfReference.value,
-          slice: slice.value,
+          ...locatorPatch(locator.value),
           label: activeLabel.value,
           ...(activeLabel.value && activeToolStore.labels[activeLabel.value]),
         };
@@ -234,11 +229,42 @@ export default defineComponent({
 
     // ---  //
 
-    const { contextMenu, openContextMenu } = useContextMenu();
+    const { contextMenu, openContextMenu: baseOpenContextMenu } =
+      useContextMenu();
 
-    const currentTools = useCurrentTools(activeToolStore, viewAxis);
+    const rectangleStore = useRectangleStore();
+    const shouldSuppressInteraction = (id: ToolID) => {
+      const rectanglePlacing = rectangleStore.tools.some(
+        (tool) => tool.placing && tool.firstPoint && tool.secondPoint
+      );
+      if (rectanglePlacing) return true;
+      if (placingTool.id.value && id !== placingTool.id.value) {
+        const placingToolData = activeToolStore.toolByID[placingTool.id.value];
+        if (placingToolData?.points?.length > 0) return true;
+      }
+      return false;
+    };
 
-    const { onHover, overlayInfo } = useHover(currentTools, slice);
+    const openContextMenu = (id: ToolID, event: any) => {
+      if (!shouldSuppressInteraction(id)) baseOpenContextMenu(id, event);
+    };
+
+    const currentTools = useCurrentTools(
+      activeToolStore,
+      viewAxis,
+      computed(() => (placingTool.id.value ? [placingTool.id.value] : [])),
+      frame
+    );
+
+    const { onHover: baseOnHover, overlayInfo } = useHover(currentTools, slice);
+
+    const onHover = (id: ToolID, event: any) => {
+      if (shouldSuppressInteraction(id)) {
+        baseOnHover(id, { ...event, hovering: false });
+        return;
+      }
+      baseOnHover(id, event);
+    };
 
     const mergePossible = computed(
       () => activeToolStore.mergeableTools.length >= 1
@@ -246,30 +272,71 @@ export default defineComponent({
 
     const segmentGroupStore = useSegmentGroupStore();
     const paintStore = usePaintToolStore();
+    const isCurrentImageCine = computed(() => isCineImage(imageId.value));
     const currentSegmentGroup = computed(() => {
-      const id = paintStore.activeSegmentGroupID;
-      if (!id) return null;
-      return segmentGroupStore.metadataByID[id] ?? null;
+      if (isCurrentImageCine.value) return null;
+      if (!imageId.value) return null;
+      const groups = segmentGroupStore.orderByParent[imageId.value];
+      if (!groups?.length) return null;
+      return segmentGroupStore.metadataByID[groups[0]] ?? null;
     });
 
     function rasterize(toolId: ToolID, segment: SegmentMask) {
-      if (!paintStore.activeSegmentGroupID) return;
-      const image =
-        segmentGroupStore.dataIndex[paintStore.activeSegmentGroupID];
-      if (!image) return;
+      if (!imageId.value) {
+        throw new Error('No image ID available for rasterization');
+      }
+      if (isCurrentImageCine.value) {
+        throw new Error('Rasterization is not supported for cine images');
+      }
+
+      const groups = segmentGroupStore.orderByParent[imageId.value];
+      if (!groups?.length) {
+        throw new Error(`No segment group exists for image ${imageId.value}`);
+      }
+
+      const segmentGroupID = groups[0];
+
+      // Switch to the correct segment group if needed
+      if (paintStore.activeSegmentGroupID !== segmentGroupID) {
+        paintStore.setActiveSegmentGroup(segmentGroupID);
+        paintStore.setActiveSegment(segment.value);
+      }
+
+      const segmentGroup = segmentGroupStore.dataIndex[segmentGroupID];
+      if (!segmentGroup) {
+        throw new Error(
+          `Failed to get segment group data for ${segmentGroupID}`
+        );
+      }
+
+      // Convert parent slice index to segment group slice index
+      const parentMeta = imageMetadata.value;
+      const segmentGroupSlice = convertSliceIndex(
+        slice.value,
+        parentMeta.lpsOrientation,
+        parentMeta.indexToWorld,
+        segmentGroup,
+        viewAxis.value
+      );
 
       const points = activeToolStore.getPoints(toolId);
-      const axis = sliceAxis.value;
+      const segmentGroupIjkIndex = getLPSDirections(
+        segmentGroup.getDirection()
+      )[viewAxis.value];
 
       const indexSpacePoints2D = points.map((pt) => {
-        const output = [...image.worldToIndex(pt)];
-        output.splice(axis, 1);
+        const output = [...segmentGroup.worldToIndex(pt)];
+        output.splice(segmentGroupIjkIndex, 1);
         return output as Vector2;
       });
 
-      const grid = createGridAccessor(image, slice.value, axis);
+      const grid = createGridAccessor(
+        segmentGroup,
+        segmentGroupSlice,
+        segmentGroupIjkIndex
+      );
       fillPoly(grid, indexSpacePoints2D, segment.value);
-      image.modified();
+      segmentGroup.modified();
     }
 
     return {
@@ -285,6 +352,7 @@ export default defineComponent({
       overlayInfo,
       rasterize,
       currentSegmentGroup,
+      isCurrentImageCine,
     };
   },
 });

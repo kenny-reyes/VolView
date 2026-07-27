@@ -7,24 +7,68 @@ import {
 } from '@itk-wasm/image-io';
 import { vtiReader, vtiWriter } from '@/src/io/vtk/async';
 import { getWorker } from '@/src/io/itk/worker';
+import type { SegmentGroupMetadata } from '@/src/store/segmentGroups';
+import { maybeBuildSegNrrdMetadata } from '@/src/io/segNrrdMetadata';
 
-export const readImage = async (file: File) => {
-  if (file.name.endsWith('.vti'))
-    return (await vtiReader(file)) as vtkImageData;
-
-  const { image } = await readImageItk(file, { webWorker: getWorker() });
-  return vtkITKHelper.convertItkToVtkImage(image);
+export type ReadImageResult = {
+  image: vtkImageData;
+  headerMetadata?: Map<string, string>;
 };
 
-export const writeImage = async (format: string, image: vtkImageData) => {
+const getHeaderMetadata = (image: { metadata?: Map<string, unknown> }) => {
+  const metadata = image.metadata;
+  if (!(metadata instanceof Map) || !metadata.size) return undefined;
+
+  const headerMetadata = new Map<string, string>();
+  metadata.forEach((value, key) => {
+    headerMetadata.set(key, typeof value === 'string' ? value : String(value));
+  });
+  return headerMetadata;
+};
+
+export const readImage = async (file: File): Promise<ReadImageResult> => {
+  if (file.name.endsWith('.vti')) {
+    return { image: (await vtiReader(file)) as vtkImageData };
+  }
+
+  const { image } = await readImageItk(file, { webWorker: getWorker() });
+  return {
+    image: vtkITKHelper.convertItkToVtkImage(image),
+    headerMetadata: getHeaderMetadata(image),
+  };
+};
+
+export const writeImage = async (
+  format: string,
+  image: vtkImageData,
+  metadata?: Map<string, string>
+) => {
   if (format === 'vti') {
     return vtiWriter(image);
   }
   // copyImage so writeImage does not detach live data when passing to worker
   const itkImage = copyImage(vtkITKHelper.convertVtkToItkImage(image));
 
+  if (metadata) {
+    itkImage.metadata = metadata;
+  }
+
   const result = await writeImageItk(itkImage, `image.${format}`, {
     webWorker: getWorker(),
+    useCompression: true,
   });
-  return result.serializedImage.data;
+  return result.serializedImage.data as Uint8Array<ArrayBuffer>;
+};
+
+export const writeSegmentation = (
+  format: string,
+  image: vtkImageData,
+  segMetadata: SegmentGroupMetadata
+) => {
+  const metadata = maybeBuildSegNrrdMetadata(
+    format,
+    segMetadata,
+    image.getDimensions() as [number, number, number]
+  );
+  return writeImage(format, image, metadata);
 };

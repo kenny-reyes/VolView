@@ -21,13 +21,14 @@ def add(a: int, b: int):
     return a + b
 
 
-@volview.expose  # exposes as "number_trivia"
-@volview.expose("get_number_trivia")  # exposes as "get_number_trivia"
-async def number_trivia():
+@volview.expose  # exposes as "cat_fact"
+@volview.expose("get_cat_fact")  # exposes as "get_cat_fact"
+async def cat_fact():
     async with aiohttp.ClientSession() as session:
-        url = "http://numbersapi.com/random/"
+        url = "https://catfact.ninja/fact"
         async with session.get(url) as resp:
-            return await resp.text()
+            data = await resp.json()
+            return data["fact"]
 
 
 @volview.expose("progress")
@@ -83,8 +84,8 @@ def get_base_image(state: ClientState, img_id: str) -> str:
 
 
 async def show_image(img_id: str):
-    store = get_current_client_store("dataset")
-    await store.setPrimarySelection(img_id)
+    store = get_current_client_store("view")
+    await store.setDataForAllViews(img_id)
 
 
 @volview.expose("medianFilter")
@@ -97,9 +98,9 @@ async def median_filter(img_id, radius):
     # blurred image, we instead assume we are re-running
     # the blur operation on the original image.
     base_image_id = get_base_image(state, img_id)
-    
+
     img = await cache_store.getVtkImageData(base_image_id)
-    
+
     if img is None:
         raise ValueError(f"No image found for ID: {base_image_id}")
 
@@ -109,7 +110,7 @@ async def median_filter(img_id, radius):
 
     blurred_id = state.image_id_map.get(base_image_id)
     images_store = get_current_client_store("images")
-    
+
     if not blurred_id:
         # Add new blurred image
         blurred_id = await images_store.addVTKImageData("Blurred image", output)

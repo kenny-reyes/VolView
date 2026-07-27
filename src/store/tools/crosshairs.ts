@@ -1,14 +1,15 @@
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import vtkCrosshairsWidget from '@/src/vtk/CrosshairsWidget';
 import type { Bounds, Vector3 } from '@kitware/vtk.js/types';
-import { inflate } from '@kitware/vtk.js/Common/DataModel/BoundingBox';
+import vtkBoundingBox from '@kitware/vtk.js/Common/DataModel/BoundingBox';
 import { computed, ref, unref, watch } from 'vue';
 import { vec3 } from 'gl-matrix';
 import { defineStore } from 'pinia';
-import { getLPSAxisFromDir } from '@/src/utils/lps';
 import { Manifest, StateFile } from '@/src/io/state-file/schema';
-import { useViewStore } from '../views';
-import useViewSliceStore from '../view-configs/slicing';
+import { useViewStore } from '@/src/store/views';
+import useViewSliceStore from '@/src/store/view-configs/slicing';
+import { ViewInfo2D } from '@/src/types/views';
+import { computeEffectiveView } from '@/src/core/views/effectiveView';
 
 export const useCrosshairsToolStore = defineStore('crosshairs', () => {
   type _This = ReturnType<typeof useCrosshairsToolStore>;
@@ -18,7 +19,7 @@ export const useCrosshairsToolStore = defineStore('crosshairs', () => {
   const handle = widgetState.getHandle();
 
   const active = ref(false);
-  const { currentImageID, currentImageMetadata } = useCurrentImage();
+  const { currentImageID, currentImageMetadata } = useCurrentImage('global');
 
   // world-space
   const position = ref<Vector3>([0, 0, 0]);
@@ -36,15 +37,10 @@ export const useCrosshairsToolStore = defineStore('crosshairs', () => {
   const viewSliceStore = useViewSliceStore();
   const viewStore = useViewStore();
 
-  // only gets views that have a slicing config
-  const currentViewIDs = computed(() => {
-    const imageID = unref(currentImageID);
-    if (imageID) {
-      return viewStore.viewIDs.filter(
-        (viewID) => !!viewSliceStore.getConfig(viewID, imageID)
-      );
-    }
-    return [];
+  const otherViews = computed(() => {
+    return viewStore
+      .getViewsForData(unref(currentImageID))
+      .filter((view): view is ViewInfo2D => view.type === '2D');
   });
 
   function getWidgetFactory(this: _This) {
@@ -66,12 +62,12 @@ export const useCrosshairsToolStore = defineStore('crosshairs', () => {
     }
     const { lpsOrientation } = unref(currentImageMetadata);
 
-    currentViewIDs.value.forEach((viewID) => {
-      const sliceConfig = viewSliceStore.getConfig(viewID, imageID);
-      const axis = getLPSAxisFromDir(sliceConfig!.axisDirection);
-      const index = lpsOrientation[axis];
+    otherViews.value.forEach((view) => {
+      const effective = computeEffectiveView(view, imageID);
+      if (effective.kind !== 'volume2D') return;
+      const index = lpsOrientation[effective.axis];
       const slice = Math.round(indexPos[index]);
-      viewSliceStore.updateConfig(viewID, imageID, { slice });
+      viewSliceStore.updateConfig(view.id, imageID, { slice });
     });
   });
 
@@ -85,7 +81,7 @@ export const useCrosshairsToolStore = defineStore('crosshairs', () => {
       const imageBounds: Bounds = [0, xDim - 1, 0, yDim - 1, 0, zDim - 1];
       // inflate by 0.5, since the image slice rendering is inflated
       // by 0.5.
-      handle.setBounds(inflate(imageBounds, 0.5));
+      handle.setBounds(vtkBoundingBox.inflate(imageBounds, 0.5));
     },
     { immediate: true }
   );
@@ -113,13 +109,16 @@ export const useCrosshairsToolStore = defineStore('crosshairs', () => {
   }
 
   function serialize(state: StateFile) {
-    const { crosshairs } = state.manifest.tools;
+    const crosshairs = state.manifest.tools?.crosshairs;
+    if (!crosshairs) return;
     crosshairs.position = position.value;
   }
 
   function deserialize(manifest: Manifest) {
-    const { crosshairs } = manifest.tools;
-    position.value = crosshairs.position;
+    const crosshairsPosition = manifest.tools?.crosshairs?.position;
+    if (crosshairsPosition) {
+      position.value = crosshairsPosition;
+    }
   }
 
   return {

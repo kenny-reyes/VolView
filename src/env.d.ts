@@ -3,7 +3,6 @@
 interface ImportMetaEnv {
   readonly VITE_DICOM_WEB_URL: string;
   readonly VITE_DICOM_WEB_NAME: string;
-  readonly VITE_ENABLE_REMOTE_SAVE: boolean;
   readonly VITE_REMOTE_SERVER_URL: string;
 }
 
@@ -12,3 +11,4 @@ interface ImportMeta {
 }
 
 declare const __VERSIONS__: Record<string, string>;
+declare const __GIT_SHORT_SHA__: string;

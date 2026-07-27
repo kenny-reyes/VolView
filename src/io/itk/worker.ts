@@ -55,12 +55,12 @@ export async function initItkWorker() {
   // preload
   try {
     await readDicomTags(new File([], 'a.dcm'));
-  } catch (err) {
+  } catch {
     // ignore
   }
   try {
     await readImage(new File([], 'a.dcm'));
-  } catch (err) {
+  } catch {
     // ignore
   }
 }

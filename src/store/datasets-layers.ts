@@ -51,7 +51,6 @@ export const useLayersStore = defineStore('layer', () => {
         sourceImage.getBounds()
       )
     ) {
-      // eslint-disable-next-line no-use-before-define
       deleteLayer(parent, source);
       throw new Error(
         'Image bounds do not intersect, so no overlap in physical space'
@@ -62,12 +61,13 @@ export const useLayersStore = defineStore('layer', () => {
 
     const name = imageCacheStore.getImageMetadata(source)?.name ?? NO_NAME;
     imageCacheStore.addVTKImageData(image, name, { id });
+    return id;
   }
 
   async function addLayer(parent: DataSelection, source: DataSelection) {
     return useErrorMessage('Failed to build layer', async () => {
       try {
-        await _addLayer(parent, source);
+        return await _addLayer(parent, source);
       } catch (error) {
         // remove failed layer from parent's layer list
         parentToLayers[parent] = parentToLayers[parent]?.filter(
@@ -107,7 +107,7 @@ export const useLayersStore = defineStore('layer', () => {
   const remove = (selectionToRemove: DataSelection) => {
     // delete as parent
     getLayers(selectionToRemove).forEach(({ selection }) =>
-      deleteLayer(selection, selection)
+      deleteLayer(selectionToRemove, selection)
     );
     // delete from layer lists
     Object.keys(parentToLayers).forEach((parent) =>
@@ -125,11 +125,13 @@ export const useLayersStore = defineStore('layer', () => {
   }
 
   function deserialize(manifest: Manifest, dataIDMap: Record<string, string>) {
+    const parentToLayersSerialized = manifest.parentToLayers;
+    if (!parentToLayersSerialized) return;
+
     const remapSelection = (selection: DataSelection) => {
       return dataIDMap[selection];
     };
 
-    const { parentToLayers: parentToLayersSerialized } = manifest;
     parentToLayersSerialized.forEach(
       ({ selectionKey, sourceSelectionKeys }) => {
         const parent = remapSelection(selectionKey);

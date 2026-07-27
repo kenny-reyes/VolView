@@ -2,13 +2,12 @@ import { runPipeline, TextStream, InterfaceTypes, Image } from 'itk-wasm';
 
 import {
   readDicomTags,
-  readImageDicomFileSeries,
   readOverlappingSegmentation,
   ReadOverlappingSegmentationResult,
 } from '@itk-wasm/dicom';
 
 import itkConfig from '@/src/io/itk/itkConfig';
-import { getDicomSeriesWorkerPool, getWorker } from '@/src/io/itk/worker';
+import { getWorker } from '@/src/io/itk/worker';
 
 export interface TagSpec {
   name: string;
@@ -48,11 +47,23 @@ async function runTask(
   inputs: any[],
   outputs: any[]
 ) {
-  return runPipeline(module, args, outputs, inputs, {
+  const result = await runPipeline(module, args, outputs, inputs, {
     webWorker: getWorker(),
     pipelineBaseUrl: itkConfig.pipelinesUrl,
     pipelineWorkerUrl: itkConfig.pipelineWorkerUrl,
+  }).catch((error) => {
+    throw new Error(
+      `itk-wasm pipeline "${module}" crashed (check browser console for details)`,
+      { cause: error }
+    );
   });
+  if (result.returnValue !== 0) {
+    const detail = result.stderr?.trim() || 'unknown error';
+    throw new Error(
+      `itk-wasm pipeline "${module}" exited with code ${result.returnValue}: ${detail}`
+    );
+  }
+  return result;
 }
 
 /**
@@ -125,13 +136,16 @@ export async function readTags<T extends TagSpec[]>(
   });
   const tagValues = new Map(result.tags);
 
-  return tags.reduce((info, t) => {
-    const { tag, name } = t;
-    if (tagValues.has(tag)) {
-      return { ...info, [name]: tagValues.get(tag) };
-    }
-    return info;
-  }, {} as Record<T[number]['name'], string>);
+  return tags.reduce(
+    (info, t) => {
+      const { tag, name } = t;
+      if (tagValues.has(tag)) {
+        return { ...info, [name]: tagValues.get(tag) };
+      }
+      return info;
+    },
+    {} as Record<T[number]['name'], string>
+  );
 }
 
 /**
@@ -200,20 +214,4 @@ export async function buildSegmentGroups(file: File) {
     ...result,
     outputImage: result.segImage,
   };
-}
-
-/**
- * Builds a volume for a set of files.
- * @async
- * @param {File[]} seriesFiles the set of files to build volume from
- * @returns ItkImage
- */
-export async function buildImage(seriesFiles: File[]) {
-  const inputImages = seriesFiles.map((file) => sanitizeFile(file));
-  const result = await readImageDicomFileSeries({
-    webWorkerPool: getDicomSeriesWorkerPool() as any,
-    inputImages,
-    singleSortedSeries: false,
-  });
-  return result;
 }

@@ -16,12 +16,14 @@ import { usePaintToolStore } from '@/src/store/tools/paint';
 import { Maybe } from '@/src/types';
 import { reactive, ref, computed, watch, toRaw } from 'vue';
 import { useMultiSelection } from '@/src/composables/useMultiSelection';
+import { isCineImage } from '@/src/core/cine/isCineImage';
 
 const UNNAMED_GROUP_NAME = 'Unnamed Segment Group';
 
 const segmentGroupStore = useSegmentGroupStore();
 const { currentImageID } = useCurrentImage();
 const dataStore = useDatasetStore();
+const isCurrentImageCine = computed(() => isCineImage(currentImageID.value));
 
 const currentSegmentGroups = computed(() => {
   if (!currentImageID.value) return [];
@@ -117,6 +119,7 @@ function stopEditing(commit: boolean) {
 function createSegmentGroup() {
   if (!currentImageID.value)
     throw new Error('Cannot create a labelmap without a base image');
+  if (isCurrentImageCine.value) return;
 
   const id = segmentGroupStore.newLabelmapFromImage(currentImageID.value);
   if (!id) throw new Error('Could not create a new labelmap');
@@ -137,7 +140,7 @@ function createSegmentGroup() {
 // Collect images that can be converted into
 // a SegmentGroup for the current background image.
 const segmentGroupConvertibles = computed(() => {
-  const primarySelection = dataStore.primarySelection;
+  const primarySelection = currentImageID.value;
   if (!primarySelection) return [];
   return dataStore.idsAsSelections
     .filter((selection) => !selectionEquals(selection, primarySelection))
@@ -148,10 +151,11 @@ const segmentGroupConvertibles = computed(() => {
 });
 
 function createSegmentGroupFromImage(selection: DataSelection) {
-  const primarySelection = dataStore.primarySelection;
+  const primarySelection = currentImageID.value;
   if (!primarySelection) {
     throw new Error('No primary selection');
   }
+  if (isCurrentImageCine.value) return;
   segmentGroupStore.convertImageToLabelmap(selection, primarySelection);
 }
 
@@ -220,27 +224,27 @@ function deleteSelected() {
 </script>
 
 <template>
-  <div class="mt-2" v-if="currentImageID">
+  <div class="mt-2 px-3" v-if="currentImageID">
     <div
-      class="text-grey text-subtitle-2 d-flex align-center justify-space-evenly mb-2"
+      class="text-grey text-subtitle-2 d-flex align-center justify-start ga-4 mb-2"
     >
       <v-btn
-        variant="tonal"
-        color="secondary"
-        density="compact"
+        class="my-1"
+        :disabled="isCurrentImageCine"
         @click.stop="createSegmentGroup"
       >
-        <v-icon class="mr-1">mdi-plus</v-icon> New Group
+        <template #prepend>
+          <v-icon>mdi-plus</v-icon>
+        </template>
+        New Group
       </v-btn>
       <v-menu location="bottom">
         <template v-slot:activator="{ props }">
-          <v-btn
-            variant="tonal"
-            color="secondary"
-            density="compact"
-            v-bind="props"
-          >
-            <v-icon class="mr-1">mdi-chevron-down</v-icon>From Image
+          <v-btn class="my-1" :disabled="isCurrentImageCine" v-bind="props">
+            <template #prepend>
+              <v-icon>mdi-chevron-down</v-icon>
+            </template>
+            From Image
           </v-btn>
         </template>
         <v-list v-if="segmentGroupConvertibles.length !== 0">
@@ -335,6 +339,7 @@ function deleteSelected() {
             </v-tooltip>
           </v-btn>
           <v-btn
+            data-testid="segment-group-save-button"
             icon="mdi-content-save"
             size="small"
             variant="text"

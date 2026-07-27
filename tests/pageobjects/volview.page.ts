@@ -7,19 +7,21 @@ import Page from './page';
 
 let lastId = 0;
 const getId = () => {
-  return lastId++;
+  return `${process.pid}-${Date.now()}-${lastId++}`;
 };
 
 export const setValueVueInput = async (
   input: ChainablePromiseElement,
   value: string
 ) => {
-  // input.setValue does not clear existing input, so click and backspace
+  // input.setValue does not clear existing input, so select all and replace.
   await input.click();
   const oldValue = await input.getValue();
   if (oldValue) {
-    const backspaces = new Array(oldValue.length).fill(Key.Backspace);
-    await browser.keys([Key.ArrowRight, ...backspaces]);
+    const selectAllModifier =
+      process.platform === 'darwin' ? 'Meta' : 'Control';
+    await browser.keys([selectAllModifier, 'a']);
+    await browser.keys(Key.Backspace);
   }
   await input.setValue(value);
 };
@@ -33,33 +35,39 @@ class VolViewPage extends Page {
     return this.samplesList.$('div[title="MRI PROSTATEx"]');
   }
 
-  get layoutGrid() {
-    return $('div[data-testid="layout-grid"]');
-  }
-
   async downloadProstateSample() {
     const sample = await this.prostateSample;
     await sample.click();
   }
 
   get views() {
-    return $$('div[data-testid~="vtk-view"] > canvas');
+    return $$('div[data-testid~="vtk-view"] canvas');
+  }
+
+  get layoutButton() {
+    return $('button[data-testid="control-button-Layouts"]');
+  }
+
+  get layoutMenuItems() {
+    return $$('.v-list-item');
   }
 
   async waitForViews(timeout = DOWNLOAD_TIMEOUT) {
-    const this_ = this;
     await browser.waitUntil(
-      async function viewsExist() {
-        const views = await this_.views;
-        if ((await views.length) === 0) return false;
-        const inView = await Promise.all(
-          Array.from(views).map((v) => v.isDisplayed({ withinViewport: true }))
-        );
-        return inView.every(Boolean);
+      async () => {
+        return browser.execute(() => {
+          const canvases = document.querySelectorAll(
+            'div[data-testid~="vtk-view"] canvas'
+          );
+          return Array.from(canvases).some((c) => {
+            const canvas = c as HTMLCanvasElement;
+            return canvas.width > 10 && canvas.height > 10;
+          });
+        });
       },
       {
         timeout,
-        timeoutMsg: `expected at least 1 view to be displayed in viewport`,
+        timeoutMsg: `expected at least 1 view to be rendered with real dimensions (timeout: ${timeout}ms)`,
       }
     );
   }
@@ -76,10 +84,9 @@ class VolViewPage extends Page {
   }
 
   async waitForNotification() {
-    const this_ = this;
     await browser.waitUntil(
       async () => {
-        const notificationCount = await this_.getNotificationsCount();
+        const notificationCount = await this.getNotificationsCount();
         return notificationCount >= 1;
       },
       {
@@ -98,8 +105,105 @@ class VolViewPage extends Page {
     await button.click();
   }
 
-  get twoViews() {
-    return $$('div[data-testid~="vtk-two-view"] > canvas');
+  get paintButton() {
+    return $('button span i[class~=mdi-brush]');
+  }
+
+  async activatePaint() {
+    const button = this.paintButton;
+    await button.click();
+  }
+
+  // Paint "Process" mode and the Fill Holes process workflow.
+  get processModeButton() {
+    return $('button*=Process');
+  }
+
+  get processTypeSelector() {
+    return $('[data-testid="process-type-selector"]');
+  }
+
+  get fillHolesProcessOption() {
+    return $('[data-testid="process-type-fillHoles"]');
+  }
+
+  get fillHolesWholeVolumeButton() {
+    return $('button*=All slices');
+  }
+
+  get fillHolesSelectedSegmentButton() {
+    return $('button*=Selected segment');
+  }
+
+  get processPreviewButton() {
+    return $('button*=Preview');
+  }
+
+  get processApplyButton() {
+    return $('button*=Apply');
+  }
+
+  get processOriginalButton() {
+    return $('button*=Original');
+  }
+
+  get processProcessedButton() {
+    return $('button*=Processed');
+  }
+
+  // The selected button in a Vuetify v-btn-toggle carries v-btn--active.
+  async isPreviewToggleActive(button: ChainablePromiseElement) {
+    const classes = await button.getAttribute('class');
+    return (classes ?? '').includes('v-btn--active');
+  }
+
+  async paintStrokeOnView(view: ChainablePromiseElement) {
+    const canvas = await view.$('canvas');
+    const location = await canvas.getLocation();
+    const size = await canvas.getSize();
+    const centerX = Math.round(location.x + size.width / 2);
+    const centerY = Math.round(location.y + size.height / 2);
+
+    await browser
+      .action('pointer')
+      .move({ x: centerX, y: centerY })
+      .down()
+      .move({ x: centerX + 40, y: centerY })
+      .move({ x: centerX + 40, y: centerY + 40 })
+      .move({ x: centerX, y: centerY + 40 })
+      .move({ x: centerX, y: centerY })
+      .up()
+      .perform();
+  }
+
+  async runFillHoles() {
+    await this.processModeButton.waitForClickable();
+    await this.processModeButton.click();
+
+    await this.selectFillHolesProcess();
+
+    const preview = this.processPreviewButton;
+    await preview.waitForClickable();
+    await preview.click();
+
+    // Reaching the "previewing" state (Apply appears) only happens after the
+    // algorithm runs successfully on the label map.
+    const apply = this.processApplyButton;
+    await apply.waitForDisplayed();
+    await apply.waitForClickable();
+    await apply.click();
+
+    // Applying returns the workflow to its start state (Preview reappears).
+    await this.processPreviewButton.waitForDisplayed();
+  }
+
+  async selectFillHolesProcess() {
+    await this.processTypeSelector.waitForClickable();
+    await this.processTypeSelector.click();
+
+    const fillHoles = this.fillHolesProcessOption;
+    await fillHoles.waitForClickable();
+    await fillHoles.click();
   }
 
   get viewTwoContainer() {
@@ -110,12 +214,55 @@ class VolViewPage extends Page {
     return $('button span i[class~=mdi-content-save-all]');
   }
 
+  get annotationsModuleTab() {
+    return $('button[data-testid="module-tab-Annotations"]');
+  }
+
+  get newSegmentGroupButton() {
+    return $('button*=New Group');
+  }
+
+  get activeDialog() {
+    return $('div[role="dialog"]');
+  }
+
+  get activeDialogInput() {
+    return this.activeDialog.$('input[placeholder="Unnamed Segment Group"]');
+  }
+
   get saveSessionFilenameInput() {
     return $('#session-state-filename');
   }
 
   get saveSessionConfirmButton() {
     return $('span[data-testid="save-session-confirm-button"]');
+  }
+
+  get segmentGroupsTab() {
+    return $('button.v-tab*=Segment Groups');
+  }
+
+  get segmentGroupSaveButtons() {
+    return $$('button[data-testid="segment-group-save-button"]');
+  }
+
+  get saveSegmentGroupFilenameInput() {
+    return this.activeDialog.$('#filename');
+  }
+
+  get saveSegmentGroupConfirmButton() {
+    return this.activeDialog.$('button=Save');
+  }
+
+  async clickFirstSegmentGroupSaveButton() {
+    await browser.waitUntil(async () => {
+      const buttons = await this.segmentGroupSaveButtons;
+      return (await buttons.length) >= 1;
+    });
+    const buttons = await this.segmentGroupSaveButtons;
+    await buttons[0].scrollIntoView();
+    await buttons[0].waitForClickable();
+    await buttons[0].click();
   }
 
   async saveSession() {
@@ -132,10 +279,27 @@ class VolViewPage extends Page {
     await confirm.click();
 
     cleanuptotal.addCleanup(async () => {
-      fs.unlinkSync(path.join(TEMP_DIR, fileName));
+      const filePath = path.join(TEMP_DIR, fileName);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     });
 
     return fileName;
+  }
+
+  async createSegmentGroup(name: string) {
+    const annotationsTab = await this.annotationsModuleTab;
+    await annotationsTab.click();
+
+    const newGroup = await this.newSegmentGroupButton;
+    await newGroup.waitForClickable();
+    await newGroup.click();
+
+    const input = await this.activeDialogInput;
+    await input.waitForDisplayed();
+    await setValueVueInput(input, name);
+    await browser.keys([Key.Enter]);
   }
 
   get editLabelButtons() {
@@ -160,7 +324,172 @@ class VolViewPage extends Page {
   }
 
   get layerOpacitySliders() {
-    return $$('div[data-testid="layer-opacity-slider"] input');
+    return $$('div[data-testid="layer-opacity-slider"]');
+  }
+
+  async getVolumeRenderingSection() {
+    const pwfEditor = await $('div.pwf-editor');
+    const exists = await pwfEditor.isExisting();
+    return exists ? pwfEditor : null;
+  }
+
+  async getView3D() {
+    const view3D = $('div[data-testid="vtk-view vtk-volume-view"]');
+    const exists = await view3D.isExisting();
+    return exists ? view3D : null;
+  }
+
+  async getView2D() {
+    const view2D = $(
+      'div[data-testid~="vtk-two-view"], div[data-testid~="vtk-cine-view"]'
+    );
+    const exists = await view2D.isExisting();
+    return exists ? view2D : null;
+  }
+
+  async getViews2D() {
+    const views2D = $$(
+      'div[data-testid~="vtk-two-view"], div[data-testid~="vtk-cine-view"]'
+    );
+    return views2D;
+  }
+
+  async waitForViewCounts(
+    expected2DCount: number,
+    expected3DExists: boolean,
+    timeout = DOWNLOAD_TIMEOUT
+  ) {
+    await browser.waitUntil(
+      async () => {
+        const counts = await browser.execute(() => ({
+          view2DCount: document.querySelectorAll(
+            'div[data-testid~="vtk-two-view"], div[data-testid~="vtk-cine-view"]'
+          ).length,
+          view3DExists:
+            document.querySelector(
+              'div[data-testid="vtk-view vtk-volume-view"]'
+            ) !== null,
+        }));
+        return (
+          counts.view2DCount === expected2DCount &&
+          counts.view3DExists === expected3DExists
+        );
+      },
+      {
+        timeout,
+        timeoutMsg: `Expected ${expected2DCount} 2D views and ${
+          expected3DExists ? 'a' : 'no'
+        } 3D view`,
+      }
+    );
+  }
+
+  async openLayoutMenu(minOptionCount = 1) {
+    const button = await this.layoutButton;
+    await browser.waitUntil(async () => button.isDisplayed(), {
+      timeout: 5000,
+      timeoutMsg: 'Layout button not displayed',
+      interval: 500,
+    });
+    await button.click();
+
+    await browser.waitUntil(
+      async () => {
+        const items = await this.layoutMenuItems;
+        const itemCount = await items.length;
+        return itemCount >= minOptionCount;
+      },
+      {
+        timeout: 5000,
+        timeoutMsg: `Expected layout menu to show at least ${minOptionCount} layout options`,
+        interval: 500,
+      }
+    );
+  }
+
+  async getLayoutOptionTitles() {
+    return browser.execute((titleSelector: string) => {
+      const items = Array.from(document.querySelectorAll(titleSelector));
+      return items.map((item) => item.textContent?.trim() ?? '');
+    }, '.v-list-item-title');
+  }
+
+  async selectLayoutOption(targetText: string) {
+    await browser.execute(
+      (text: string, titleSelector: string) => {
+        const items = Array.from(document.querySelectorAll(titleSelector));
+        const targetItem = items.find(
+          (item) => item.textContent?.trim() === text
+        );
+        if (!targetItem) return;
+        const listItem = targetItem.closest(
+          '.v-list-item'
+        ) as HTMLElement | null;
+        listItem?.click();
+      },
+      targetText,
+      '.v-list-item-title'
+    );
+  }
+
+  async focusFirst2DView() {
+    const views = await this.getViews2D();
+    const viewCount = await views.length;
+    if (!viewCount) {
+      throw new Error('No 2D views rendered to focus');
+    }
+
+    const firstView = views[0];
+    const canvas = await firstView.$('canvas');
+    await canvas.scrollIntoView();
+    await canvas.click();
+  }
+
+  async getFirst2DSlice() {
+    return browser.execute((selector: string) => {
+      const views = document.querySelectorAll(selector);
+      if (views.length === 0) return null;
+      const overlayText = views[0].textContent;
+      const match = overlayText?.match(/Slice:\s*(\d+)/);
+      return match ? parseInt(match[1], 10) : null;
+    }, 'div[data-testid~="vtk-two-view"], div[data-testid~="vtk-cine-view"]');
+  }
+
+  async waitForSliceDecrease(initialSlice: number | null) {
+    await browser.waitUntil(
+      async () => {
+        const currentSlice = await this.getFirst2DSlice();
+        if (initialSlice === null) {
+          return currentSlice !== null;
+        }
+        return currentSlice !== null && currentSlice < initialSlice;
+      },
+      {
+        timeoutMsg: 'Expected slice to decrease after advancing',
+      }
+    );
+  }
+
+  async advanceSliceAndWait() {
+    const initialSlice = await this.getFirst2DSlice();
+    await browser.keys([Key.ArrowDown]);
+    await this.waitForSliceDecrease(initialSlice);
+  }
+
+  async waitForLoadingIndicator(
+    view: ChainablePromiseElement,
+    timeout = DOWNLOAD_TIMEOUT
+  ) {
+    await browser.waitUntil(
+      async () => {
+        const loadingIndicator = await view.$('.loading-indicator');
+        return !(await loadingIndicator.isDisplayed());
+      },
+      {
+        timeout,
+        timeoutMsg: 'Expected loading indicator to disappear',
+      }
+    );
   }
 }
 

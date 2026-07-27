@@ -27,14 +27,19 @@ function mergeHeaders(base: Headers, supplementInit?: HeadersInit) {
   return merged;
 }
 
+/**
+ * The authenticated browser HTTP primitive: merges every global header
+ * (bearer/auth) into the request, honoring precedence
+ * `globalHeaders < Request.headers < RequestInit.headers`.
+ */
 export const $fetch: typeof fetch = (
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> => {
-  return fetch(input, {
-    ...init,
-    headers: mergeHeaders(globalHeaders, init?.headers),
-  });
+  let headers = new Headers(globalHeaders);
+  if (input instanceof Request) headers = mergeHeaders(headers, input.headers);
+  headers = mergeHeaders(headers, init?.headers);
+  return fetch(input, { ...init, headers });
 };
 
 /**
@@ -78,7 +83,7 @@ const HTTPHandler: URLHandler = {
       return response.blob();
     }
 
-    const contentLength = Number(response.headers.get('content-length')) ?? -1;
+    const contentLength = Number(response.headers.get('content-length')) || -1;
     if (contentLength < 0) {
       progress(Infinity);
       return response.blob();
@@ -93,7 +98,6 @@ const HTTPHandler: URLHandler = {
     let recv = 0;
     let done = false;
     do {
-      // eslint-disable-next-line no-await-in-loop
       const readData = await reader.read();
       done = readData.done;
       if (readData.value && !done) {
@@ -193,7 +197,6 @@ export async function fetchFileWithProgress(
   let recv = 0;
   let done = false;
   do {
-    // eslint-disable-next-line no-await-in-loop
     const readData = await reader.read();
     done = readData.done;
     if (readData.value && !done) {

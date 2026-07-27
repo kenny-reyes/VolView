@@ -1,5 +1,7 @@
 /// <reference types="vitest" />
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { Plugin, defineConfig, normalizePath } from 'vite';
 import vue from '@vitejs/plugin-vue';
@@ -10,34 +12,7 @@ import { visualizer } from 'rollup-plugin-visualizer';
 import { sentryVitePlugin } from '@sentry/vite-plugin';
 import replace from '@rollup/plugin-replace';
 
-import pkgLock from './package-lock.json';
 import { config } from './wdio.shared.conf';
-
-function getPackageInfo(lockInfo: typeof pkgLock) {
-  if (lockInfo.lockfileVersion === 2) {
-    return {
-      versions: {
-        volview: lockInfo.version,
-        'vtk.js': lockInfo.dependencies['@kitware/vtk.js'].version,
-        'itk-wasm': lockInfo.dependencies['itk-wasm'].version,
-      },
-    };
-  }
-
-  if (lockInfo.lockfileVersion === 3) {
-    return {
-      versions: {
-        volview: lockInfo.version,
-        'vtk.js': lockInfo.packages['node_modules/@kitware/vtk.js'].version,
-        'itk-wasm': lockInfo.packages['node_modules/itk-wasm'].version,
-      },
-    };
-  }
-
-  throw new Error(
-    'VolView build: your package-lock.json version is not 2 or 3. Cannot extract dependency versions.'
-  );
-}
 
 function resolveNodeModulePath(moduleName: string) {
   const require = createRequire(import.meta.url);
@@ -55,13 +30,46 @@ function resolvePath(...args: string[]) {
   return normalizePath(path.resolve(...args));
 }
 
+function getPackageInfo() {
+  const mainPkgPath = path.resolve(__dirname, 'package.json');
+  const mainPkg = JSON.parse(fs.readFileSync(mainPkgPath, 'utf-8'));
+
+  const vtkJsPath = path.join(
+    resolveNodeModulePath('@kitware/vtk.js'),
+    'package.json'
+  );
+  const vtkJsPkg = JSON.parse(fs.readFileSync(vtkJsPath, 'utf-8'));
+
+  const itkWasmPath = path.join(
+    resolveNodeModulePath('itk-wasm'),
+    'package.json'
+  );
+  const itkWasmPkg = JSON.parse(fs.readFileSync(itkWasmPath, 'utf-8'));
+
+  return {
+    versions: {
+      volview: mainPkg.version,
+      'vtk.js': vtkJsPkg.version,
+      'itk-wasm': itkWasmPkg.version,
+    },
+  };
+}
+
+function getGitShortSha() {
+  try {
+    return execSync('git rev-parse --short HEAD').toString().trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 const rootDir = resolvePath(__dirname);
 const distDir = resolvePath(rootDir, 'dist');
 
 const { ANALYZE_BUNDLE, SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT } =
   process.env;
 
-const pkgInfo = getPackageInfo(pkgLock);
+const pkgInfo = getPackageInfo();
 
 function configureSentryPlugin() {
   return SENTRY_AUTH_TOKEN && SENTRY_ORG && SENTRY_PROJECT
@@ -102,6 +110,7 @@ export default defineConfig({
       'vtk.js': pkgInfo.versions['vtk.js'],
       'itk-wasm': pkgInfo.versions['itk-wasm'],
     },
+    __GIT_SHORT_SHA__: JSON.stringify(getGitShortSha()),
   },
   resolve: {
     alias: [
@@ -122,7 +131,7 @@ export default defineConfig({
         if (id.includes('@kitware/vtk.js')) {
           if (id.includes('ColorMaps.json.js')) {
             // We don't use the built-in colormaps
-            return 'export const v = []';
+            return 'export default [];';
           }
 
           // We don't use these classes
@@ -213,10 +222,12 @@ export default defineConfig({
     configureSentryPlugin(),
   ],
   server: {
-    port: 8080,
     // so `npm run test:e2e:dev` can access the webdriver static server temp directory
     proxy: {
       '/tmp': config.baseUrl!,
+      // Local Girder stack, so girder-launched sessions (urls=/api/v1/...)
+      // work same-origin against the dev server.
+      '/api': 'http://localhost:8080',
     },
   },
   optimizeDeps: {
@@ -225,10 +236,11 @@ export default defineConfig({
   test: {
     environment: 'happy-dom',
     // canvas support. See: https://github.com/vitest-dev/vitest/issues/740
-    threads: false,
-    deps: {
-      // needed for unit tests on components utilizing vuetify
-      inline: ['vuetify'],
+    maxWorkers: 1,
+    server: {
+      deps: {
+        inline: ['vuetify'],
+      },
     },
     setupFiles: ['./tests/setupVitest.ts'],
   },

@@ -11,7 +11,12 @@ import { Manifest, StateFile } from '@/src/io/state-file/schema';
 import { getPlaneTransforms } from '@/src/utils/frameOfReference';
 import { ToolID } from '@/src/types/annotation-tool';
 import { defineAnnotationToolStore } from '@/src/utils/defineAnnotationToolStore';
-import { useAnnotationTool } from './useAnnotationTool';
+import {
+  declareAnnotationToolManifestRefs,
+  useAnnotationTool,
+} from './useAnnotationTool';
+
+declareAnnotationToolManifestRefs('polygons');
 
 const toolDefaults = () => ({
   points: [] as Array<Vector3>,
@@ -127,6 +132,7 @@ export const usePolygonStore = defineAnnotationToolStore('polygon', () => {
   const sameSliceAndLabel = (a: Tool, b: Tool) =>
     a.label === b.label &&
     a.slice === b.slice &&
+    a.frame === b.frame &&
     a.frameOfReference === b.frameOfReference;
 
   const mergable = (a: Tool, b: Tool) => {
@@ -184,11 +190,12 @@ export const usePolygonStore = defineAnnotationToolStore('polygon', () => {
   // --- serialization --- //
 
   function serialize(state: StateFile) {
+    if (!state.manifest.tools) return;
     state.manifest.tools.polygons = toolAPI.serializeTools();
   }
 
   function deserialize(manifest: Manifest, dataIDMap: Record<string, string>) {
-    toolAPI.deserializeTools(manifest.tools.polygons, dataIDMap);
+    toolAPI.deserializeTools(manifest.tools?.polygons, dataIDMap);
   }
 
   return {

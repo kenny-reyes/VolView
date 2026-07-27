@@ -6,13 +6,25 @@ export function useGlobalErrorHook() {
   const messageStore = useMessageStore();
 
   const onError = (event: ErrorEvent) => {
+    // Benign per the ResizeObserver spec: the observer delivered late, nothing
+    // failed. Browsers surface it as a window error; never toast it.
+    if (
+      typeof event.message === 'string' &&
+      event.message.includes('ResizeObserver loop')
+    ) {
+      return;
+    }
     console.error(event);
-    const errorMessage = event.message ?? 'Unknown global error';
+    const error = event.error ?? event.message ?? 'Unknown global error';
 
-    captureException(event.error ?? errorMessage);
+    captureException(error);
 
-    const details = event.error ? event.error : { details: errorMessage };
-    messageStore.addError('Application error (click for details)', details);
+    const errorOptions =
+      error instanceof Error ? { error } : { details: String(error) };
+    messageStore.addError(
+      'Application error (click for details)',
+      errorOptions
+    );
   };
 
   onMounted(() => {

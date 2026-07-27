@@ -4,6 +4,7 @@ import {
   ProgressiveImageStatus,
 } from '@/src/core/progressiveImage';
 import { useIdStore } from '@/src/store/id';
+import { useMessageStore } from '@/src/store/messages';
 import { Maybe } from '@/src/types';
 import { ImageMetadata } from '@/src/types/image';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
@@ -22,10 +23,22 @@ export const useImageCacheStore = defineStore('image-cache', () => {
   const imageLoading = reactive<Record<string, boolean>>({});
   const imageErrors = reactive<Record<string, Error[]>>({});
   const imageListenerCleanup: Record<string, () => void> = {};
+  const deletionCallbacks = new Set<(deletedIDs: string[]) => void>();
+
+  function onImageDeleted(callback: (deletedIDs: string[]) => void) {
+    deletionCallbacks.add(callback);
+    return () => deletionCallbacks.delete(callback);
+  }
 
   function getVtkImageData(id: Maybe<string>): Maybe<vtkImageData> {
     if (!id) return null;
-    return imageById[id]?.getVtkImageData() ?? null;
+    const image = imageById[id];
+    if (!image) return null;
+    const data = image.getVtkImageData();
+    // ProgressiveImage initializes with empty vtkImageData before actual data loads.
+    // VTK.js volume renderer crashes on empty data (null scalar texture).
+    if (!data.getPointData().getScalars()?.getData()?.length) return null;
+    return data;
   }
 
   function getImageMetadata(id: Maybe<string>): Maybe<ImageMetadata> {
@@ -44,6 +57,9 @@ export const useImageCacheStore = defineStore('image-cache', () => {
     const onError = (error: Error) => {
       imageErrors[id] ??= [];
       imageErrors[id].push(error);
+
+      const messageStore = useMessageStore();
+      messageStore.addError('Error loading DICOM data', { error });
     };
 
     imageListenerCleanup[id] = () => {
@@ -91,20 +107,45 @@ export const useImageCacheStore = defineStore('image-cache', () => {
   function addVTKImageData(
     imageData: vtkImageData,
     name: string,
-    options: { id?: string } = {}
+    options: { id?: string; headerMetadata?: Map<string, string> } = {}
   ) {
-    return addProgressiveImage(new LoadedVtkImage(imageData, name), options);
+    const image = new LoadedVtkImage(imageData, name);
+    if (options.headerMetadata) image.headerMetadata = options.headerMetadata;
+    return addProgressiveImage(image, { id: options.id });
   }
 
   function removeImage(id: string) {
     if (!(id in imageById)) return;
     unregisterListeners(id);
 
+    // Release vtk data and any per-image caches (e.g. cine compressed frames
+    // and decoded-frame LRU). Without this, removing a dataset leaks all of
+    // its memory until the page reloads.
+    imageById[id].dispose();
+
     const idx = imageIds.value.indexOf(id);
     if (idx > -1) imageIds.value.splice(idx, 1);
     delete imageById[id];
     delete imageStatus[id];
     delete imageLoading[id];
+    delete imageErrors[id];
+    [...deletionCallbacks].forEach((callback) => callback([id]));
+  }
+
+  /**
+   * Updates an existing image's VTK data while maintaining the same ID.
+   */
+  function updateVTKImageData(id: string, newImageData: vtkImageData): void {
+    const progressiveImage = imageById[id];
+    const oldImageData = progressiveImage.vtkImageData.value;
+
+    progressiveImage.vtkImageData.value = newImageData;
+    // trigger texture update
+    newImageData.modified();
+
+    if (oldImageData && oldImageData !== newImageData) {
+      oldImageData.delete();
+    }
   }
 
   /**
@@ -131,6 +172,7 @@ export const useImageCacheStore = defineStore('image-cache', () => {
     imageErrors,
     getVtkImageData,
     getImageMetadata,
+    onImageDeleted,
     addProgressiveImage,
     addVTKImageData,
     updateVTKImageData,

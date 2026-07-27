@@ -14,6 +14,9 @@ export type AnnotationTool = {
   slice: number;
   frameOfReference: FrameOfReference;
 
+  // Temporal cursor. Present iff the bound image has a time axis (cine).
+  frame?: number;
+
   /**
    * Is this tool unfinished?
    */
@@ -28,4 +31,9 @@ export type AnnotationTool = {
   name: string;
 
   hidden?: boolean;
+
+  /*
+   * Arbitrary key-value pairs associated with the annotation.
+   */
+  metadata?: Record<string, string>;
 };

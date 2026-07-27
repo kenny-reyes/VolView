@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { VtkViewContext } from '@/src/components/vtk/context';
 import { useSliceConfig } from '@/src/composables/useSliceConfig';
-import { useSliceConfigInitializer } from '@/src/composables/useSliceConfigInitializer';
 import { useMouseRangeManipulatorListener } from '@/src/core/vtk/useMouseRangeManipulatorListener';
 import { useVtkInteractionManipulator } from '@/src/core/vtk/useVtkInteractionManipulator';
 import { Maybe } from '@/src/types';
@@ -14,15 +13,15 @@ import { inject, toRefs, unref, watch, computed } from 'vue';
 import { useViewStore } from '@/src/store/views';
 import { actionToKey } from '@/src/composables/useKeyboardShortcuts';
 
-interface Props {
+type Props = {
   viewId: string;
   imageId: Maybe<string>;
   viewDirection: LPSAxisDir;
   manipulatorConfig?: IMouseRangeManipulatorInitialValues;
-}
+};
 
 const props = defineProps<Props>();
-const { viewId, imageId, viewDirection, manipulatorConfig } = toRefs(props);
+const { viewId, imageId, manipulatorConfig } = toRefs(props);
 
 const view = inject(VtkViewContext);
 if (!view) throw new Error('No VtkView');
@@ -61,25 +60,21 @@ watch(
 );
 
 const sliceConfig = useSliceConfig(viewId, imageId);
-useSliceConfigInitializer(viewId, imageId, viewDirection);
 
 const scroll = useMouseRangeManipulatorListener(
   rangeManipulator,
   'vertical',
   sliceConfig.range,
   1,
-  sliceConfig.slice.value
+  sliceConfig.slice.value,
+  -1,
+  // Set the scrolled view as the active view — only on real user input.
+  () => {
+    useViewStore().setActiveView(unref(viewId));
+  }
 );
 
 syncRef(scroll, sliceConfig.slice, { immediate: true });
-
-// set just scrolled view as active view
-watch(scroll, () => {
-  const viewStore = useViewStore();
-  if (unref(viewId) !== viewStore.activeViewID) {
-    viewStore.setActiveViewID(unref(viewId));
-  }
-});
 </script>
 
 <template><slot></slot></template>

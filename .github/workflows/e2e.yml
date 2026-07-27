@@ -5,16 +5,23 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     name: E2E Testing on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     env:
       DOWNLOAD_TIMEOUT: 90000
+      VITE_SHOW_SAMPLE_DATA: true
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - name: Install node-canvas deps (macos)
         if: matrix.os != 'ubuntu-latest'
         run: brew install pkg-config cairo pango libpng jpeg giflib librsvg pixman

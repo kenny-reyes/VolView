@@ -8,6 +8,12 @@ import { Maybe } from '@/src/types';
 import { Awaitable } from '@vueuse/core';
 import { toAscii } from '@/src/utils';
 import { FILE_EXT_TO_MIME } from '@/src/io/mimeTypes';
+import { Tags } from '@/src/core/dicomTags';
+import {
+  decodeUltrasoundRegion,
+  SEQUENCE_OF_ULTRASOUND_REGIONS,
+  UltrasoundRegions,
+} from '@/src/core/streaming/dicom/ultrasoundRegion';
 
 export type ReadDicomTagsFunction = (
   file: File
@@ -27,6 +33,7 @@ export class DicomMetaLoader implements MetaLoader {
   private fetcher: Fetcher;
   private readDicomTags: ReadDicomTagsFunction;
   private blob: Blob | null;
+  public ultrasoundRegions: UltrasoundRegions | undefined;
 
   constructor(fetcher: Fetcher, readDicomTags: ReadDicomTagsFunction) {
     this.fetcher = fetcher;
@@ -49,6 +56,8 @@ export class DicomMetaLoader implements MetaLoader {
     const stream = this.fetcher.getStream();
     let explicitVr = true;
     let dicomUpToPixelDataIdx = -1;
+    let modality: string | undefined;
+    let ultrasoundRegions: UltrasoundRegions | undefined;
 
     const parse = createDicomParser({
       stopAtElement(group, element) {
@@ -59,6 +68,23 @@ export class DicomMetaLoader implements MetaLoader {
         if (el.group === 0x0002 && el.element === 0x0010) {
           const transferSyntaxUid = toAscii(el.data as Uint8Array);
           explicitVr = transferSyntaxUid !== ImplicitTransferSyntaxUID;
+        }
+        // Capture Modality tag (0008,0060)
+        if (el.group === 0x0008 && el.element === 0x0060 && el.data) {
+          modality = toAscii(el.data as Uint8Array).trim();
+        }
+        if (
+          el.group === SEQUENCE_OF_ULTRASOUND_REGIONS[0] &&
+          el.element === SEQUENCE_OF_ULTRASOUND_REGIONS[1] &&
+          !ultrasoundRegions
+        ) {
+          // Decoding can throw if a malformed FD/US value has an unexpected
+          // length; swallow rather than abort the whole metadata load.
+          try {
+            ultrasoundRegions = decodeUltrasoundRegion(el.data);
+          } catch (err) {
+            console.warn('Failed to decode SequenceOfUltrasoundRegions:', err);
+          }
         }
       },
     });
@@ -101,8 +127,18 @@ export class DicomMetaLoader implements MetaLoader {
 
     this.blob = validPixelDataBlob;
 
+    // Skip ITK-WASM for RT modalities as they're not supported
+    if (modality?.startsWith('RT')) {
+      this.tags = [[Tags.Modality, modality]];
+      return;
+    }
+
     const metadataFile = new File([validPixelDataBlob], 'file.dcm');
     this.tags = await this.readDicomTags(metadataFile);
+
+    if (modality === 'US' && ultrasoundRegions) {
+      this.ultrasoundRegions = ultrasoundRegions;
+    }
   }
 
   stop() {

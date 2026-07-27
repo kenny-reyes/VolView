@@ -4,7 +4,6 @@ import { useImageStore } from '@/src/store/datasets-images';
 import { useModelStore } from '@/src/store/datasets-models';
 import { FILE_READERS } from '@/src/io';
 import { ImportHandler, asLoadableResult } from '@/src/io/import/common';
-import { useDatasetStore } from '@/src/store/datasets';
 import { useMessageStore } from '@/src/store/messages';
 import { Skip } from '@/src/utils/evaluateChain';
 
@@ -23,23 +22,20 @@ const importSingleFile: ImportHandler = async (dataSource) => {
   }
 
   const reader = FILE_READERS.get(dataSource.fileType)!;
-  const dataObject = await reader(dataSource.file);
+  const { dataObject, headerMetadata } = await reader(dataSource.file);
 
   if (dataObject.isA('vtkImageData')) {
     const dataID = useImageStore().addVTKImageData(
       dataSource.file.name,
-      dataObject as vtkImageData
+      dataObject as vtkImageData,
+      { headerMetadata }
     );
 
     return asLoadableResult(dataID, dataSource, 'image');
   }
 
   if (dataObject.isA('vtkPolyData')) {
-    if (!useDatasetStore().primarySelection) {
-      useMessageStore().addWarning(
-        'Load an image to see the mesh. Initializing viewports from mesh files is not implemented.'
-      );
-    }
+    useMessageStore().addWarning('Meshes are currently not viewable');
     const dataID = useModelStore().addVTKPolyData(
       dataSource.file.name,
       dataObject as vtkPolyData
@@ -48,7 +44,9 @@ const importSingleFile: ImportHandler = async (dataSource) => {
     return asLoadableResult(dataID, dataSource, 'model');
   }
 
-  throw new Error('Data reader did not produce a valid dataset');
+  throw new Error(
+    `Failed to import "${dataSource.file.name}". The file may be corrupted or in an unsupported format variant.`
+  );
 };
 
 export default importSingleFile;

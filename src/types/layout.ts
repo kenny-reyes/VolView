@@ -1,10 +1,15 @@
-export enum LayoutDirection {
-  V = 'V',
-  H = 'H',
-}
+export type LayoutDirection = 'row' | 'column';
+
+export type LayoutItem =
+  | {
+      type: 'slot';
+      slotIndex: number;
+    }
+  | ({
+      type: 'layout';
+    } & Layout);
 
 export type Layout = {
   direction: LayoutDirection;
-  items: ReadonlyArray<Layout | string>;
-  name?: string;
+  items: ReadonlyArray<LayoutItem>;
 };

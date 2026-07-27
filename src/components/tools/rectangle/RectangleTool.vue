@@ -28,6 +28,7 @@ import { Tools } from '@/src/store/tools/types';
 import { getLPSAxisFromDir } from '@/src/utils/lps';
 import { LPSAxisDir } from '@/src/types/lps';
 import { useRectangleStore } from '@/src/store/tools/rectangles';
+import { usePolygonStore } from '@/src/store/tools/polygons';
 import {
   useCurrentTools,
   useContextMenu,
@@ -36,9 +37,10 @@ import {
 } from '@/src/composables/annotationTool';
 import AnnotationContextMenu from '@/src/components/tools/AnnotationContextMenu.vue';
 import AnnotationInfo from '@/src/components/tools/AnnotationInfo.vue';
-import { useFrameOfReference } from '@/src/composables/useFrameOfReference';
 import { Maybe } from '@/src/types';
-import { useSliceInfo } from '@/src/composables/useSliceInfo';
+import { useViewLocator } from '@/src/composables/useViewLocator';
+import { locatorPatch } from '@/src/core/annotations/locator';
+import { ToolID } from '@/src/types/annotation-tool';
 import { watchImmediate } from '@vueuse/core';
 import RectangleWidget2D from './RectangleWidget2D.vue';
 
@@ -69,20 +71,13 @@ export default defineComponent({
     const activeToolStore = useActiveToolStore();
     const { activeLabel } = storeToRefs(activeToolStore);
 
-    const sliceInfo = useSliceInfo(viewId, imageId);
-    const slice = computed(() => sliceInfo.value?.slice ?? 0);
+    const { locator, frame, slice } = useViewLocator(viewId, imageId);
 
-    const { currentImageID, currentImageMetadata } = useCurrentImage();
+    const { currentImageID } = useCurrentImage();
     const isToolActive = computed(() => toolStore.currentTool === toolType);
     const viewAxis = computed(() => getLPSAxisFromDir(viewDirection.value));
 
     // --- active tool management --- //
-
-    const frameOfReference = useFrameOfReference(
-      viewDirection,
-      slice,
-      currentImageMetadata
-    );
 
     const placingTool = usePlacingAnnotationTool(
       activeToolStore,
@@ -90,8 +85,7 @@ export default defineComponent({
         if (!currentImageID.value) return {};
         return {
           imageID: currentImageID.value,
-          frameOfReference: frameOfReference.value,
-          slice: slice.value,
+          ...locatorPatch(locator.value),
           label: activeLabel.value,
           ...(activeLabel.value && activeToolStore.labels[activeLabel.value]),
         };
@@ -121,11 +115,45 @@ export default defineComponent({
 
     // --- //
 
-    const { contextMenu, openContextMenu } = useContextMenu();
+    const { contextMenu, openContextMenu: baseOpenContextMenu } =
+      useContextMenu();
 
-    const currentTools = useCurrentTools(activeToolStore, viewAxis);
+    const currentTools = useCurrentTools(
+      activeToolStore,
+      viewAxis,
+      // only show this view's placing tool
+      computed(() => {
+        if (placingTool.id.value) return [placingTool.id.value];
+        return [];
+      }),
+      frame
+    );
 
-    const { onHover, overlayInfo } = useHover(currentTools, slice);
+    const { onHover: baseOnHover, overlayInfo } = useHover(currentTools, slice);
+
+    // Check if any polygon is actively being placed (has points)
+    const polygonStore = usePolygonStore();
+    const isAnyPolygonPlacing = () => {
+      return polygonStore.tools.some(
+        (tool) => tool.placing && tool.points.length > 0
+      );
+    };
+
+    // Suppress hover/context menu when a polygon is actively being placed
+    const onHover = (id: ToolID, event: any) => {
+      if (isAnyPolygonPlacing()) {
+        baseOnHover(id, { ...event, hovering: false });
+        return;
+      }
+      baseOnHover(id, event);
+    };
+
+    const openContextMenu = (id: ToolID, event: any) => {
+      if (isAnyPolygonPlacing()) {
+        return;
+      }
+      baseOpenContextMenu(id, event);
+    };
 
     return {
       tools: currentTools,

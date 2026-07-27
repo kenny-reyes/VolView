@@ -8,7 +8,11 @@ import { Action, NOOP } from '../constants';
 import { useKeyboardShortcutsStore } from '../store/keyboard-shortcuts';
 import { useCurrentImage } from './useCurrentImage';
 import { useSliceConfig } from './useSliceConfig';
+import { useCineFrame } from './useCineFrame';
 import { useDatasetStore } from '../store/datasets';
+import { usePaintToolStore } from '../store/tools/paint';
+import { PaintMode } from '../core/tools/paint';
+import { computeEffectiveView } from '../core/views/effectiveView';
 
 const applyLabelOffset = (offset: number) => () => {
   const toolToStore = {
@@ -35,6 +39,11 @@ const setTool = (tool: Tools) => () => {
   useToolStore().setCurrentTool(tool);
 };
 
+const startPaintInMode = (mode: PaintMode) => () => {
+  useToolStore().setCurrentTool(Tools.Paint);
+  usePaintToolStore().setMode(mode);
+};
+
 const showKeyboardShortcuts = () => {
   const keyboardStore = useKeyboardShortcutsStore();
   keyboardStore.settingsOpen = !keyboardStore.settingsOpen;
@@ -42,9 +51,21 @@ const showKeyboardShortcuts = () => {
 
 const changeSlice = (offset: number) => () => {
   const { currentImageID } = useCurrentImage();
-  const { activeViewID } = useViewStore();
+  const viewStore = useViewStore();
+  const { activeView } = viewStore;
+  if (!activeView) return;
 
-  const { slice: currentSlice } = useSliceConfig(activeViewID, currentImageID);
+  const view = viewStore.getView(activeView);
+  if (!view) return;
+
+  const effective = computeEffectiveView(view, currentImageID.value);
+  if (effective.kind === 'cine') {
+    const { frame, setFrame } = useCineFrame(activeView, currentImageID);
+    setFrame(frame.value + offset);
+    return;
+  }
+
+  const { slice: currentSlice } = useSliceConfig(activeView, currentImageID);
   currentSlice.value += offset;
 };
 
@@ -54,11 +75,17 @@ const clearScene = () => () => {
 };
 
 const deleteCurrentImage = () => () => {
-  const datasetStore = useDatasetStore();
-  datasetStore.remove(datasetStore.primaryImageID);
+  const { currentImageID } = useCurrentImage();
+  if (currentImageID.value) {
+    const datasetStore = useDatasetStore();
+    datasetStore.remove(currentImageID.value);
+  }
+};
 
-  // Automatically select next image
-  datasetStore.setPrimarySelection(datasetStore.idsAsSelections[0]);
+const changeBrushSize = (delta: number) => () => {
+  const paintStore = usePaintToolStore();
+  const newSize = Math.max(1, paintStore.brushSize + delta);
+  paintStore.setBrushSize(newSize);
 };
 
 export const ACTION_TO_FUNC = {
@@ -66,8 +93,11 @@ export const ACTION_TO_FUNC = {
   pan: setTool(Tools.Pan),
   zoom: setTool(Tools.Zoom),
   ruler: setTool(Tools.Ruler),
-  paint: setTool(Tools.Paint),
-  brushSize: NOOP, // act as modifier key rather than immediate effect, so no-op
+  paint: startPaintInMode(PaintMode.CirclePaint),
+  paintEraser: startPaintInMode(PaintMode.Erase),
+  brushSizeModifier: NOOP, // act as modifier key rather than immediate effect, so no-op
+  decreaseBrushSize: changeBrushSize(-1),
+  increaseBrushSize: changeBrushSize(1),
   rectangle: setTool(Tools.Rectangle),
   crosshairs: setTool(Tools.Crosshairs),
   temporaryCrosshairs: NOOP, // behavior implemented elsewhere
@@ -75,8 +105,8 @@ export const ACTION_TO_FUNC = {
   polygon: setTool(Tools.Polygon),
   select: setTool(Tools.Select),
 
-  nextSlice: changeSlice(1),
-  previousSlice: changeSlice(-1),
+  nextSlice: changeSlice(-1),
+  previousSlice: changeSlice(1),
   grabSlice: NOOP, // acts as a modifier key rather than immediate effect, so no-op
 
   decrementLabel: applyLabelOffset(-1),

@@ -14,7 +14,6 @@ import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 import { ChunkState } from '@/src/core/streaming/chunkStateMachine';
 import {
   type ChunkImage,
-  ThumbnailStrategy,
   ChunkStatus,
   ChunkImageEvents,
 } from '@/src/core/streaming/chunkImage';
@@ -26,6 +25,7 @@ import {
 import { ensureError } from '@/src/utils';
 import { computed } from 'vue';
 import vtkITKHelper from '@kitware/vtk.js/Common/DataModel/ITKHelper';
+import { unitToMm } from '@/src/core/streaming/dicom/ultrasoundRegion';
 
 const { fastComputeRange } = vtkDataArray;
 
@@ -50,7 +50,7 @@ function itkImageToURI(itkImage: Image) {
   for (let i = 0; i < itkBuf.length; i += 1) {
     const byte = itkBuf[i] as number;
     // ABGR order
-    // eslint-disable-next-line no-bitwise
+
     arr32[i] = (255 << 24) | (byte << 16) | (byte << 8) | byte;
   }
 
@@ -77,7 +77,7 @@ export default class DicomChunkImage
 {
   protected chunks: Chunk[];
   private chunkListeners: Array<() => void>;
-  private thumbnailCache: WeakMap<Chunk, Promise<unknown>>;
+  private thumbnailCache: WeakMap<Chunk, Promise<string>>;
   private events: Emitter<ChunkImageEvents>;
   private chunkStatus: ChunkStatus[];
 
@@ -207,18 +207,20 @@ export default class DicomChunkImage
     });
     this.onChunksUpdated();
 
-    this.registerChunkListeners();
-    this.processNewChunks(newChunks);
-
     if (this.getModality() !== 'SEG') {
       this.reallocateImage();
     }
+
+    this.registerChunkListeners();
+    this.processNewChunks(newChunks);
+
+    // Update data range with already loaded chunks after reallocating image
+    if (this.getModality() !== 'SEG') {
+      this.updateDataRangeFromChunks();
+    }
   }
 
-  getThumbnail(strategy: ThumbnailStrategy): Promise<any> {
-    if (strategy !== ThumbnailStrategy.MiddleSlice)
-      throw new Error('Can only handle MiddleSlice thumbnailing strategy');
-
+  getThumbnail(): Promise<string | null> {
     const middle = Math.floor(this.chunks.length / 2);
     const chunk = this.chunks[middle];
 
@@ -236,18 +238,22 @@ export default class DicomChunkImage
   }
 
   private processNewChunks(chunks: Chunk[]) {
-    chunks
-      .filter((chunk) => chunk.state === ChunkState.Loaded)
-      .forEach((_, idx) => {
-        this.onChunkHasData(idx);
+    chunks.forEach((chunk, idx) => {
+      if (chunk.state !== ChunkState.Loaded) return;
+
+      this.onChunkHasData(idx).catch((err) => {
+        this.onChunkErrored(idx, err);
       });
+    });
   }
 
   private registerChunkListeners() {
     this.chunkListeners = [
       ...this.chunks.map((chunk, index) => {
         const stopDoneData = chunk.addEventListener('doneData', () => {
-          this.onChunkHasData(index);
+          this.onChunkHasData(index).catch((err) => {
+            this.onChunkErrored(index, err);
+          });
         });
 
         const stopError = chunk.addEventListener('error', (err) => {
@@ -271,13 +277,59 @@ export default class DicomChunkImage
   private reallocateImage() {
     this.vtkImageData.value.delete();
     this.vtkImageData.value = allocateImageFromChunks(this.chunks);
+    this.applyUltrasoundSpacing();
+  }
 
-    // recalculate image data's data range, since allocateImageFromChunks doesn't know anything about it
+  private applyUltrasoundSpacing() {
+    if (this.getModality() !== 'US') return;
+
+    // Ultrasound DICOMs are typically a single multi-frame chunk, so the
+    // region table on chunk[0] applies to the whole image. If a US series
+    // ever spanned multiple chunks with differing regions, this would
+    // silently use the first chunk's spacing for all of them.
+    const regions = this.chunks[0]?.ultrasoundRegions;
+    if (!regions?.region) return;
+
+    // VTK image data has a single global spacing, so multi-region images
+    // (e.g. dual-pane B-mode + Doppler) cannot be fully represented. The
+    // first region's spacing is applied to the whole image; warn so the
+    // mismatch on additional panes is at least visible in the console.
+    if (regions.regionCount > 1) {
+      console.warn(
+        `Ultrasound image has ${regions.regionCount} regions; only the first region's physical spacing is applied. Multi-region (e.g. dual-pane B-mode + Doppler) ultrasound is not fully supported.`
+      );
+    }
+
+    const { region } = regions;
+    const xFactor = unitToMm(region.physicalUnitsXDirection);
+    const yFactor = unitToMm(region.physicalUnitsYDirection);
+    // All-or-nothing: if either axis lacks a spatial unit (e.g. one axis is
+    // cm and the other is seconds, or unitless) the metadata can't be trusted
+    // as a 2D physical spacing, so leave the default 1mm fallback in place.
+    if (xFactor === null || yFactor === null) {
+      console.warn(
+        `Ultrasound spacing not applied: PhysicalUnitsXDirection=${region.physicalUnitsXDirection}, PhysicalUnitsYDirection=${region.physicalUnitsYDirection}; only code 3 (cm) is converted to mm.`
+      );
+      return;
+    }
+
+    const [, , zSpacing] = this.vtkImageData.value.getSpacing();
+    this.vtkImageData.value.setSpacing([
+      region.physicalDeltaX * xFactor,
+      region.physicalDeltaY * yFactor,
+      zSpacing,
+    ]);
+  }
+
+  private updateDataRangeFromChunks() {
     const scalars = this.vtkImageData.value.getPointData().getScalars();
-    this.dataRangeFromChunks().forEach(([min, max], compIdx) => {
-      scalars.setRange({ min, max }, compIdx);
-    });
-    scalars.modified(); // so image-stats will trigger update of range
+    const ranges = this.dataRangeFromChunks();
+    if (ranges.length > 0) {
+      ranges.forEach(([min, max], compIdx) => {
+        scalars.setRange({ min, max }, compIdx);
+      });
+      scalars.modified(); // so image-stats will trigger update of range
+    }
   }
 
   private dataRangeFromChunks() {
@@ -310,7 +362,9 @@ export default class DicomChunkImage
 
   private async onSegChunkHasData(chunkIndex: number) {
     if (this.chunks.length !== 1 || chunkIndex !== 0)
-      throw new Error('cannot handle multiple seg files');
+      throw new Error(
+        `Cannot handle multiple SEG files. Expected 1 chunk at index 0, got ${this.chunks.length} chunks with current index ${chunkIndex}`
+      );
 
     const [chunk] = this.chunks;
     const results = await buildSegmentGroups(
@@ -328,7 +382,10 @@ export default class DicomChunkImage
 
   private async onRegularChunkHasData(chunkIndex: number) {
     const chunk = this.chunks[chunkIndex];
-    if (!chunk.dataBlob) throw new Error('Chunk does not have data');
+    if (!chunk.dataBlob)
+      throw new Error(`Chunk ${chunkIndex} does not have data`);
+
+    const chunkId = chunk.metadata ? getChunkId(chunk) : `index-${chunkIndex}`;
     const result = await readImage(
       new File([chunk.dataBlob], `file-${chunkIndex}.dcm`),
       {
@@ -336,7 +393,16 @@ export default class DicomChunkImage
       }
     );
 
-    if (!result.image.data) throw new Error('No data read from chunk');
+    if (!result.image.data)
+      throw new Error(`No data read from chunk ${chunkId}`);
+
+    if (result.image.size[2] > 1 && this.chunks.length > 1) {
+      // we're trying to load multiple chunks where individual chunks have multiple frames
+      throw new Error(
+        `Loading a single volume from multiple DICOM files where individual files contain multiple frames is not supported. ` +
+          `File ${chunkId} (chunk ${chunkIndex}) contains ${result.image.size[2]} frames.`
+      );
+    }
 
     const scalars = this.vtkImageData.value.getPointData().getScalars();
     const pixelData = scalars.getData() as TypedArray;

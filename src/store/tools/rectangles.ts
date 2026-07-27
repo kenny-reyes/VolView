@@ -4,7 +4,12 @@ import { Manifest, StateFile } from '@/src/io/state-file/schema';
 import { RECTANGLE_LABEL_DEFAULTS } from '@/src/config';
 import { ToolID } from '@/src/types/annotation-tool';
 
-import { useAnnotationTool } from './useAnnotationTool';
+import {
+  declareAnnotationToolManifestRefs,
+  useAnnotationTool,
+} from './useAnnotationTool';
+
+declareAnnotationToolManifestRefs('rectangles');
 
 const rectangleDefaults = () => ({
   firstPoint: [0, 0, 0] as Vector3,
@@ -33,11 +38,12 @@ export const useRectangleStore = defineAnnotationToolStore('rectangles', () => {
   // --- serialization --- //
 
   function serialize(state: StateFile) {
+    if (!state.manifest.tools) return;
     state.manifest.tools.rectangles = toolAPI.serializeTools();
   }
 
   function deserialize(manifest: Manifest, dataIDMap: Record<string, string>) {
-    toolAPI.deserializeTools(manifest.tools.rectangles, dataIDMap);
+    toolAPI.deserializeTools(manifest.tools?.rectangles, dataIDMap);
   }
 
   return {

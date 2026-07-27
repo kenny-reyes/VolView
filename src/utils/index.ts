@@ -50,6 +50,9 @@ export function clampValue(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 export function pick<T, K extends keyof T>(obj: T, ...keys: K[]): Pick<T, K> {
   return keys.reduce((o, k) => ({ ...o, [k]: obj[k] }), {} as Pick<T, K>);
 }
@@ -110,7 +113,7 @@ export const chunk = <T>(arr: T[], size: number) =>
   );
 
 export function plural(n: number, word: string, pluralWord?: string) {
-  return n > 1 ? pluralWord ?? `${word}s` : word;
+  return n === 1 ? word : (pluralWord ?? `${word}s`);
 }
 
 export const ensureDefault = <T>(
@@ -119,7 +122,6 @@ export const ensureDefault = <T>(
   default_: T
 ) => {
   if (!(key in records)) {
-    // eslint-disable-next-line no-param-reassign
     records[key] = default_;
   }
 
@@ -216,6 +218,10 @@ export function ensureError(e: unknown) {
   return e instanceof Error ? e : new Error(JSON.stringify(e));
 }
 
+export function getErrorDetail(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 // remove undefined properties
 export function cleanUndefined(obj: Object) {
   return Object.entries(obj).reduce(
@@ -234,10 +240,7 @@ export function standardizeColor(color: Maybe<string>) {
   return ctx.fillStyle;
 }
 
-// https://github.com/colinhacks/zod/discussions/839#discussioncomment-4335236
-export function zodEnumFromObjKeys<K extends string>(
-  obj: Record<K, any>
-): z.ZodEnum<[K, ...K[]]> {
+export function zodEnumFromObjKeys<K extends string>(obj: Record<K, any>) {
   const [firstKey, ...otherKeys] = Object.keys(obj) as K[];
   return z.enum([firstKey, ...otherKeys]);
 }

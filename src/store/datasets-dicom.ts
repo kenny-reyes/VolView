@@ -1,13 +1,13 @@
-import vtkITKHelper from '@kitware/vtk.js/Common/DataModel/ITKHelper';
 import { defineStore } from 'pinia';
 import { Image } from 'itk-wasm';
 import * as DICOM from '@/src/io/dicom';
 import { Chunk } from '@/src/core/streaming/chunk';
 import { useImageCacheStore } from '@/src/store/image-cache';
 import DicomChunkImage from '@/src/core/streaming/dicomChunkImage';
-import { Tags } from '@/src/core/dicomTags';
+import DicomCineImage from '@/src/core/cine/DicomCineImage';
+import { parseCineDicom } from '@/src/core/cine/parseCineDicom';
+import { isUltrasoundMultiframeSopClass, Tags } from '@/src/core/dicomTags';
 import { removeFromArray } from '../utils';
-import { useFileStore } from './datasets-files';
 
 export const ANONYMOUS_PATIENT = 'Anonymous';
 export const ANONYMOUS_PATIENT_ID = 'ANONYMOUS';
@@ -16,29 +16,29 @@ export function imageCacheMultiKey(offset: number, asThumbnail: boolean) {
   return `${offset}!!${asThumbnail}`;
 }
 
-export interface VolumeKeys {
+export type VolumeKeys = {
   patientKey: string;
   studyKey: string;
   volumeKey: string;
-}
+};
 
-export interface PatientInfo {
+export type PatientInfo = {
   PatientID: string;
   PatientName: string;
   PatientBirthDate: string;
   PatientSex: string;
-}
+};
 
-export interface StudyInfo {
+export type StudyInfo = {
   StudyID: string;
   StudyInstanceUID: string;
   StudyDate: string;
   StudyTime: string;
   AccessionNumber: string;
   StudyDescription: string;
-}
+};
 
-export interface VolumeInfo {
+export type VolumeInfo = {
   NumberOfSlices: number;
   VolumeID: string;
   Modality: string;
@@ -47,52 +47,17 @@ export interface VolumeInfo {
   SeriesDescription: string;
   WindowLevel: string;
   WindowWidth: string;
-}
-
-const buildImage = async (seriesFiles: File[], modality: string) => {
-  const messages: string[] = [];
-  if (modality === 'SEG') {
-    const segFile = seriesFiles[0];
-    const results = await DICOM.buildSegmentGroups(segFile);
-    if (seriesFiles.length > 1)
-      messages.push(
-        'Tried to make one volume from 2 SEG modality files. Using only the first file!'
-      );
-    return {
-      modality: 'SEG',
-      builtImageResults: results,
-      messages,
-    };
-  }
-  return {
-    builtImageResults: await DICOM.buildImage(seriesFiles),
-    messages,
-  };
+  // For 'cine', NumberOfSlices is the frame count. Optional for back-compat
+  // with saved state that predates the field.
+  kind?: 'volume' | 'cine';
 };
 
-const constructImage = async (volumeKey: string, volumeInfo: VolumeInfo) => {
-  const fileStore = useFileStore();
-  const files = fileStore.getFiles(volumeKey);
-  if (!files) throw new Error('No files for volume key');
-  const results = await buildImage(files, volumeInfo.Modality);
-  const image = vtkITKHelper.convertItkToVtkImage(
-    results.builtImageResults.outputImage
-  );
-  return {
-    ...results,
-    image,
-  };
-};
-
-interface State {
+type State = {
   // volumeKey -> imageCacheMultiKey -> ITKImage
   sliceData: Record<string, Record<string, Image>>;
 
   // volume invalidation information
   needsRebuild: Record<string, boolean>;
-
-  // Avoid recomputing image data for the same volume by checking this for existing buildVolume tasks
-  volumeBuildResults: Record<string, ReturnType<typeof constructImage>>;
 
   // patientKey -> patient info
   patientInfo: Record<string, PatientInfo>;
@@ -112,7 +77,7 @@ interface State {
   volumeStudy: Record<string, string>;
   // studyKey -> patientKey
   studyPatient: Record<string, string>;
-}
+};
 
 /**
  * Trims and collapses multiple spaces into one.
@@ -129,6 +94,19 @@ export const getDisplayName = (info: VolumeInfo) => {
     info.SeriesInstanceUID
   );
 };
+
+export function isCineChunkGroup(chunks: Chunk[]): boolean {
+  if (chunks.length !== 1) return false;
+  const meta = chunks[0].metadata;
+  if (!meta) return false;
+  const lookup = Object.fromEntries(meta);
+  const sopClass = lookup[Tags.SOPClassUID] ?? '';
+  const numberOfFrames = parseInt(
+    (lookup[Tags.NumberOfFrames] ?? '0').trim(),
+    10
+  );
+  return isUltrasoundMultiframeSopClass(sopClass) && numberOfFrames > 1;
+}
 
 export const getWindowLevels = (info: VolumeInfo) => {
   const { WindowWidth, WindowLevel } = info;
@@ -160,7 +138,6 @@ export const getWindowLevels = (info: VolumeInfo) => {
 export const useDICOMStore = defineStore('dicom', {
   state: (): State => ({
     sliceData: {},
-    volumeBuildResults: {},
     patientInfo: {},
     patientStudies: {},
     studyInfo: {},
@@ -182,10 +159,21 @@ export const useDICOMStore = defineStore('dicom', {
 
       await Promise.all(
         Object.entries(chunksByVolume).map(async ([id, sortedChunks]) => {
-          const image = imageCacheStore.imageById[id] ?? new DicomChunkImage();
-          if (!(image instanceof DicomChunkImage)) {
-            throw new Error('image is not a DicomChunkImage');
+          if (isCineChunkGroup(sortedChunks)) {
+            const importedAsCine = await this._importCineChunk(
+              id,
+              sortedChunks[0]
+            );
+            if (importedAsCine) return;
           }
+
+          const cachedImage = imageCacheStore.imageById[id];
+          if (cachedImage && !(cachedImage instanceof DicomChunkImage)) {
+            throw new Error(
+              `Volume ${id} is already loaded as a non-chunk progressive image; cannot re-import as a chunk volume.`
+            );
+          }
+          const image = cachedImage ?? new DicomChunkImage();
 
           await image.addChunks(sortedChunks);
           imageCacheStore.addProgressiveImage(image, { id });
@@ -220,6 +208,7 @@ export const useDICOMStore = defineStore('dicom', {
             SeriesDescription: metadata[Tags.SeriesDescription],
             WindowLevel: metadata[Tags.WindowLevel],
             WindowWidth: metadata[Tags.WindowWidth],
+            kind: 'volume',
           };
 
           this._updateDatabase(patientInfo, studyInfo, volumeInfo);
@@ -230,6 +219,62 @@ export const useDICOMStore = defineStore('dicom', {
       );
 
       return chunksByVolume;
+    },
+
+    async _importCineChunk(id: string, chunk: Chunk): Promise<boolean> {
+      const imageCacheStore = useImageCacheStore();
+
+      // If we already created this cine image (state-file reload), bail.
+      if (this.volumeInfo[id]?.kind === 'cine') {
+        return true;
+      }
+
+      const cachedImage = imageCacheStore.imageById[id];
+      if (cachedImage && !(cachedImage instanceof DicomCineImage)) {
+        throw new Error(
+          `Volume ${id} is already loaded as a non-cine progressive image; cannot re-import as a cine clip.`
+        );
+      }
+
+      await chunk.loadData();
+      const blob = chunk.dataBlob;
+      if (!blob) throw new Error('Cine DICOM chunk has no data');
+      const buffer = await blob.arrayBuffer();
+      let parsed: ReturnType<typeof parseCineDicom>;
+      try {
+        parsed = parseCineDicom(buffer);
+      } catch (err) {
+        console.warn(
+          'Failed to parse cine DICOM; falling back to volume import',
+          err
+        );
+        return false;
+      }
+
+      if (!DicomCineImage.isSupported(parsed.header)) {
+        return false;
+      }
+
+      const image = new DicomCineImage(parsed);
+      imageCacheStore.addProgressiveImage(image, { id });
+
+      const { patient, study, series } = parsed.header;
+      const volumeInfo: VolumeInfo = {
+        NumberOfSlices: parsed.header.numberOfFrames,
+        VolumeID: id,
+        Modality: series.Modality,
+        SeriesInstanceUID: series.SeriesInstanceUID,
+        SeriesNumber: series.SeriesNumber,
+        SeriesDescription: series.SeriesDescription,
+        WindowLevel: '',
+        WindowWidth: '',
+        kind: 'cine',
+      };
+
+      this._updateDatabase(patient, study, volumeInfo);
+
+      image.setName(getDisplayName(volumeInfo));
+      return true;
     },
 
     _updateDatabase(
@@ -269,10 +314,6 @@ export const useDICOMStore = defineStore('dicom', {
         delete this.volumeInfo[volumeKey];
         delete this.sliceData[volumeKey];
         delete this.volumeStudy[volumeKey];
-
-        if (volumeKey in this.volumeBuildResults) {
-          delete this.volumeBuildResults[volumeKey];
-        }
 
         removeFromArray(this.studyVolumes[studyKey], volumeKey);
         if (this.studyVolumes[studyKey].length === 0) {

@@ -4,16 +4,31 @@ import { getAxisBounds } from '@/src/utils/lps';
 import { NOOP } from '@/src/constants';
 import vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane';
 import type { Vector2, Vector3 } from '@kitware/vtk.js/types';
+import type { MaybeRef } from 'vue';
 import { computed, reactive, readonly, unref } from 'vue';
-import { MaybeRef } from '@vueuse/core';
 import { vec3 } from 'gl-matrix';
 import { defineStore } from 'pinia';
-import { arrayEqualsWithComparator } from '@/src/utils';
+import { arrayEqualsWithComparator, isRecord } from '@/src/utils';
 import { Maybe } from '@/src/types';
 import { useImageCacheStore } from '@/src/store/image-cache';
+import { onImageDeleted } from '@/src/composables/onImageDeleted';
+import { declareManifestRefs } from '@/src/core/manifestRefs';
 import { LPSCroppingPlanes } from '../../types/crop';
 import { ImageMetadata } from '../../types/image';
 import { StateFile, Manifest } from '../../io/state-file/schema';
+
+// The manifest references this store's remove cascade keeps clean (see the
+// onImageDeleted registration below), declared for the dev-only save backstop.
+declareManifestRefs('tools.crop', (manifest) => {
+  const tools = isRecord(manifest.tools) ? manifest.tools : {};
+  return isRecord(tools.crop)
+    ? Object.keys(tools.crop).map((id) => ({
+        kind: 'dataset' as const,
+        id,
+        where: `tools.crop[${id}]`,
+      }))
+    : [];
+});
 
 type Plane = {
   origin: Vector3;
@@ -131,6 +146,14 @@ export const useCropStore = defineStore('crop', () => {
     state.croppingByImageID[imageID] = clampCroppingPlanes(imageID, planes);
   };
 
+  // Delete-base cleanup: crop state is keyed by dataset id, so a removed image
+  // must drop its entry or `serialize` carries an orphaned crop key.
+  onImageDeleted((deletedIDs) => {
+    deletedIDs.forEach((id) => {
+      delete state.croppingByImageID[id];
+    });
+  });
+
   const setCroppingForAxis = (
     imageID: string,
     axis: LPSAxis,
@@ -162,11 +185,13 @@ export const useCropStore = defineStore('crop', () => {
 
   function serialize(stateFile: StateFile) {
     const { tools } = stateFile.manifest;
+    if (!tools) return;
     tools.crop = state.croppingByImageID;
   }
 
   function deserialize(manifest: Manifest, dataIDMap: Record<string, string>) {
-    const cropping = manifest.tools.crop;
+    const cropping = manifest.tools?.crop;
+    if (!cropping) return;
 
     Object.entries(cropping).forEach(([imageID, planes]) => {
       const newImageID = dataIDMap[imageID];

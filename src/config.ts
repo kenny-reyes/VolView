@@ -4,11 +4,10 @@ import MRAHeadThumbnail from '@/src/assets/samples/MRA-Head_and_Neck.jpg';
 import CTAHeadThumbnail from '@/src/assets/samples/CTA-Head_and_Neck.jpg';
 import USFetusThumbnail from '@/src/assets/samples/3DUS-Fetus.jpg';
 import { SegmentMask } from '@/src/types/segment';
-import { Layout, LayoutDirection } from './types/layout';
-import { ViewSpec } from './types/views';
+import type { LayoutConfig } from './utils/layoutParsing';
+import type { ViewInfoInit } from './types/views';
 import { SampleDataset } from './types';
 import { Action } from './constants';
-import { Tools } from './store/tools/types';
 
 /**
  * These are the initial view IDs.
@@ -26,159 +25,86 @@ export const InitViewIDs: Record<string, string> = {
   ObliqueThree: 'Oblique3D',
 };
 
-/**
- * View spec for the initial view IDs.
- */
-export const InitViewSpecs: Record<string, ViewSpec> = {
-  [InitViewIDs.Coronal]: {
-    viewType: '2D',
-    props: {
-      viewDirection: 'Posterior',
-      viewUp: 'Superior',
+export const getAvailableViews = () => {
+  const list: ViewInfoInit[] = [
+    {
+      name: 'Oblique',
+      type: 'Oblique',
+      dataID: null,
+      options: {},
     },
-  },
-  [InitViewIDs.Sagittal]: {
-    viewType: '2D',
-    props: {
-      viewDirection: 'Right',
-      viewUp: 'Superior',
+    {
+      name: 'Volume',
+      type: '3D',
+      dataID: null,
+      options: {
+        viewDirection: 'Posterior',
+        viewUp: 'Superior',
+      },
     },
-  },
-  [InitViewIDs.Axial]: {
-    viewType: '2D',
-    props: {
-      viewDirection: 'Superior',
-      viewUp: 'Anterior',
+    {
+      name: 'Coronal',
+      type: '2D',
+      dataID: null,
+      options: {
+        orientation: 'Coronal',
+      },
     },
-  },
-  [InitViewIDs.ObliqueCoronal]: {
-    viewType: 'Oblique',
-    props: {
-      viewDirection: 'Posterior',
-      viewUp: 'Superior',
+    {
+      name: 'Sagittal',
+      type: '2D',
+      dataID: null,
+      options: {
+        orientation: 'Sagittal',
+      },
     },
-  },
-  [InitViewIDs.ObliqueSagittal]: {
-    viewType: 'Oblique',
-    props: {
-      viewDirection: 'Right',
-      viewUp: 'Superior',
+    {
+      name: 'Axial',
+      type: '2D',
+      dataID: null,
+      options: {
+        orientation: 'Axial',
+      },
     },
-  },
-  [InitViewIDs.ObliqueAxial]: {
-    viewType: 'Oblique',
-    props: {
-      viewDirection: 'Superior',
-      viewUp: 'Anterior',
-    },
-  },
-  [InitViewIDs.Three]: {
-    viewType: '3D',
-    props: {
-      viewDirection: 'Posterior',
-      viewUp: 'Superior',
-    },
-  },
-  [InitViewIDs.ObliqueThree]: {
-    viewType: 'Oblique3D',
-    props: {
-      viewDirection: 'Posterior',
-      viewUp: 'Superior',
-      slices: [
-        {
-          viewID: InitViewIDs.ObliqueSagittal,
-          axis: 'Sagittal',
-        },
-        {
-          viewID: InitViewIDs.ObliqueCoronal,
-          axis: 'Coronal',
-        },
-        {
-          viewID: InitViewIDs.ObliqueAxial,
-          axis: 'Axial',
-        },
-      ],
-    },
-  },
+  ];
+
+  const byName = list.reduce(
+    (acc, view) => ({ ...acc, [view.name]: view }),
+    {} as Record<string, ViewInfoInit>
+  );
+
+  return { list, byName };
 };
 
-/**
- * The default view spec.
- */
-export const DefaultViewSpec = InitViewSpecs[InitViewIDs.Axial];
-
-/**
- * The default layout.
- */
-export const DefaultLayoutName = 'Quad View';
-
-/**
- * Defines the default layouts.
- */
-export const Layouts: Record<string, Layout> = [
-  {
-    name: 'Axial Only',
-    direction: LayoutDirection.H,
-    items: [InitViewIDs.Axial],
-  },
-  {
-    name: 'Axial Primary',
-    direction: LayoutDirection.V,
+export const DefaultNamedLayouts: Record<string, LayoutConfig> = {
+  'Four Up': [
+    ['axial', 'coronal'],
+    ['sagittal', 'volume'],
+  ],
+  'Axial Coronal Sagittal': {
+    direction: 'row',
     items: [
-      InitViewIDs.Axial,
+      'axial',
       {
-        direction: LayoutDirection.H,
-        items: [InitViewIDs.Three, InitViewIDs.Coronal, InitViewIDs.Sagittal],
+        direction: 'column',
+        items: ['coronal', 'sagittal'],
       },
     ],
   },
-  {
-    name: '3D Primary',
-    direction: LayoutDirection.V,
+  'Axial Only': [['axial']],
+  '3D Only': [['volume']],
+  Oblique: [['oblique']],
+  '3D Primary': {
+    direction: 'row',
     items: [
-      InitViewIDs.Three,
+      'volume',
       {
-        direction: LayoutDirection.H,
-        items: [InitViewIDs.Coronal, InitViewIDs.Sagittal, InitViewIDs.Axial],
+        direction: 'column',
+        items: ['axial', 'coronal', 'sagittal'],
       },
     ],
   },
-  {
-    name: 'Quad View',
-    direction: LayoutDirection.H,
-    items: [
-      {
-        direction: LayoutDirection.V,
-        items: [InitViewIDs.Coronal, InitViewIDs.Three],
-      },
-      {
-        direction: LayoutDirection.V,
-        items: [InitViewIDs.Sagittal, InitViewIDs.Axial],
-      },
-    ],
-  },
-  {
-    name: 'Oblique View',
-    direction: LayoutDirection.H,
-    items: [
-      {
-        direction: LayoutDirection.V,
-        items: [InitViewIDs.ObliqueCoronal, InitViewIDs.ObliqueThree],
-      },
-      {
-        direction: LayoutDirection.V,
-        items: [InitViewIDs.ObliqueSagittal, InitViewIDs.ObliqueAxial],
-      },
-    ],
-  },
-  {
-    name: '3D Only',
-    direction: LayoutDirection.H,
-    items: [InitViewIDs.Three],
-  },
-].reduce((layouts, layout) => {
-  return { ...layouts, [layout.name]: layout };
-}, {});
+};
 
 export const SAMPLE_DATA: SampleDataset[] = [
   {
@@ -269,7 +195,10 @@ export const ACTION_TO_KEY = {
   zoom: 'z',
   ruler: 'm',
   paint: 'p',
-  brushSize: 'ctrl',
+  paintEraser: 'e',
+  brushSizeModifier: 'ctrl',
+  decreaseBrushSize: '[',
+  increaseBrushSize: ']',
   rectangle: 'r',
   crosshairs: 'c',
   temporaryCrosshairs: 'shift-c',
@@ -290,14 +219,6 @@ export const ACTION_TO_KEY = {
 
   showKeyboardShortcuts: '?',
 } satisfies Record<Action, string>;
-
-export const ALLOW_MAXIMIZE_TOOLS = [
-  Tools.WindowLevel,
-  Tools.Pan,
-  Tools.Zoom,
-  Tools.Select,
-  Tools.Crosshairs,
-];
 
 export const DEFAULT_SEGMENT_MASKS: SegmentMask[] = [
   {

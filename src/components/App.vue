@@ -17,7 +17,9 @@
           <div class="fill-height" style="display: grid; grid-template-columns: 40px 1fr; height: 100%;">
             <controls-strip :has-data="hasData"></controls-strip>
             <div class="d-flex flex-column flex-grow-1">
-              <layout-grid v-show="hasData" :layout="layout" />
+              <VtkRenderWindowParent>
+                <layout-grid v-show="hasData" :layout="layout" />
+              </VtkRenderWindowParent>
               <welcome-page
                 v-if="!hasData"
                 :loading="showLoading"
@@ -51,11 +53,13 @@
 <script lang="ts">
 import { computed, defineComponent, onMounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
-import { UrlParams } from '@vueuse/core';
-import vtkURLExtract from '@kitware/vtk.js/Common/Core/URLExtract';
 import { useDisplay } from 'vuetify';
 import useLoadDataStore from '@/src/store/load-data';
 import { useViewStore } from '@/src/store/views';
+// Side-effect import: registers processing's config section and
+// launch-load subscriber before any config or data loads.
+import '@/src/processing';
+import { signalLaunchLoadComplete } from '@/src/core/launchLoad';
 import useRemoteSaveStateStore from '@/src/store/remote-save-state';
 import AppBar from '@/src/components/AppBar.vue';
 import ControlsStrip from '@/src/components/ControlsStrip.vue';
@@ -81,6 +85,9 @@ import {
   stripTokenFromUrl,
 } from '@/src/utils/token';
 import { defaultImageMetadata } from '@/src/core/progressiveImage';
+import VtkRenderWindowParent from '@/src/components/vtk/VtkRenderWindowParent.vue';
+import { useSyncWindowing } from '@/src/composables/useSyncWindowing';
+import { readLaunchParams } from '@/src/utils/urlParams';
 
 export default defineComponent({
   name: 'App',
@@ -94,6 +101,7 @@ export default defineComponent({
     ControlsModal,
     WelcomePage,
     AppBar,
+    VtkRenderWindowParent,
   },
 
   setup() {
@@ -102,6 +110,10 @@ export default defineComponent({
 
     useGlobalErrorHook();
     useKeyboardShortcuts();
+
+    // --- sync handling --- //
+
+    useSyncWindowing();
 
     // --- file handling --- //
 
@@ -134,38 +146,39 @@ export default defineComponent({
 
     // --- parse URL -- //
 
-    populateAuthorizationToken();
+    // A `tokenUrl=` bearer is fetched asynchronously; await it before loading so
+    // the first data requests carry the Authorization header.
+    const authReady = populateAuthorizationToken();
     stripTokenFromUrl();
 
-    const urlParams = vtkURLExtract.extractURLParameters() as UrlParams;
+    const urlParams = readLaunchParams();
 
-    onMounted(() => {
-      if (!urlParams.urls) {
-        return;
-      }
-
-      loadUrls(urlParams);
+    onMounted(async () => {
+      await authReady;
+      await loadUrls(urlParams);
+      // Feature entry points subscribe to this (see launchLoad.ts).
+      await signalLaunchLoadComplete();
     });
 
-    // --- remote server --- //
+    // --- remote save state URL --- //
 
-    const serverStore = useServerStore();
-
-    onMounted(() => {
-      serverStore.connect();
-    });
-
-    // --- save state --- //
-    if (import.meta.env.VITE_ENABLE_REMOTE_SAVE && urlParams.save) {
+    if (urlParams.save) {
       const url = Array.isArray(urlParams.save)
         ? urlParams.save[0]
         : urlParams.save;
       useRemoteSaveStateStore().setSaveUrl(url);
     }
 
+    // --- remote server --- //
+
+    const serverStore = useServerStore();
+    onMounted(() => {
+      serverStore.connect();
+    });
+
     // --- layout --- //
 
-    const { layout } = storeToRefs(useViewStore());
+    const { visibleLayout } = storeToRefs(useViewStore());
 
     // --- //
 
@@ -177,7 +190,7 @@ export default defineComponent({
       loadFiles,
       hasData,
       showLoading,
-      layout,
+      layout: visibleLayout,
     };
   },
 });

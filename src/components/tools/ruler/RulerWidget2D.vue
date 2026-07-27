@@ -14,6 +14,7 @@ import {
   watchEffect,
   inject,
   onUnmounted,
+  onMounted,
 } from 'vue';
 import vtkPlaneManipulator from '@kitware/vtk.js/Widgets/Manipulators/PlaneManipulator';
 import { useImage } from '@/src/composables/useCurrentImage';
@@ -30,8 +31,10 @@ import {
 import { ToolID } from '@/src/types/annotation-tool';
 import { Maybe } from '@/src/types';
 import { useSliceInfo } from '@/src/composables/useSliceInfo';
+import { useCineFrame } from '@/src/composables/useCineFrame';
 import { VtkViewContext } from '@/src/components/vtk/context';
 import { whenever } from '@vueuse/core';
+import { toolRenderSlice } from '@/src/core/annotations/locator';
 
 export default defineComponent({
   name: 'RulerWidget2D',
@@ -66,6 +69,7 @@ export default defineComponent({
 
     const sliceInfo = useSliceInfo(viewId, imageId);
     const slice = computed(() => sliceInfo.value?.slice ?? 0);
+    const { frame: cineFrame } = useCineFrame(viewId, imageId);
 
     const rulerStore = useRulerStore();
     const ruler = computed(() => rulerStore.rulerByID[toolId.value]);
@@ -92,9 +96,9 @@ export default defineComponent({
       { immediate: true }
     );
 
-    // --- reset on slice/image changes --- //
-
-    watch([slice, imageId], () => {
+    // Reset unfinished placement when the view's cursor moves: slice for
+    // volume views, frame for cine.
+    watch([slice, cineFrame, imageId], () => {
       const isPlaced = widget.getWidgetState().getIsPlaced();
       if (!isPlaced) {
         widget.resetInteractions();
@@ -123,7 +127,7 @@ export default defineComponent({
       updatePlaneManipulatorFor2DView(
         manipulator,
         viewDirection.value,
-        ruler.value?.slice ?? slice.value,
+        toolRenderSlice(ruler.value, slice.value),
         imageMetadata.value
       );
     });
@@ -149,7 +153,10 @@ export default defineComponent({
     onVTKEvent(widgetFactory.getWidgetState(), 'onModified', () =>
       updateVisibleState(widgetState)
     );
-    updateVisibleState(widgetState);
+
+    onMounted(() => {
+      updateVisibleState(widgetState);
+    });
 
     return {
       ruler,

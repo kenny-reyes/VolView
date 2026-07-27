@@ -6,7 +6,6 @@ import {
   getDataSourceName,
 } from '@/src/io/import/dataSource';
 import useLoadDataStore from '@/src/store/load-data';
-import { useDatasetStore } from '@/src/store/datasets';
 import { useDICOMStore } from '@/src/store/datasets-dicom';
 import { useLayersStore } from '@/src/store/datasets-layers';
 import { useSegmentGroupStore } from '@/src/store/segmentGroups';
@@ -16,6 +15,7 @@ import { parseUrl } from '@/src/utils/url';
 import { logError } from '@/src/utils/loggers';
 import {
   importDataSources,
+  importVolumeDataSources,
   toDataSelection,
 } from '@/src/io/import/importDataSources';
 import {
@@ -28,6 +28,7 @@ import {
   ImportDataSourcesResult,
 } from '@/src/io/import/common';
 import { isDicomImage } from '@/src/utils/dataSelection';
+import { useViewStore } from '@/src/store/views';
 
 // higher value priority is preferred for picking a primary selection
 const BASE_MODALITY_TYPES = {
@@ -80,17 +81,27 @@ function isSegmentation(extension: string, name: string) {
   return extensions.includes(extension);
 }
 
-// does not pick segmentation images
+function sortByDataSourceName(a: LoadableResult, b: LoadableResult) {
+  const nameA = getDataSourceName(a.dataSource) ?? '';
+  const nameB = getDataSourceName(b.dataSource) ?? '';
+  return nameA.localeCompare(nameB);
+}
+
+// does not pick segmentation or layer images
 function findBaseImage(
   loadableDataSources: Array<LoadableResult>,
-  segmentGroupExtension: string
+  segmentGroupExtension: string,
+  layerExtension: string
 ) {
   const baseImages = loadableDataSources
     .filter(({ dataType }) => dataType === 'image')
     .filter((importResult) => {
       const name = getDataSourceName(importResult.dataSource);
       if (!name) return false;
-      return !isSegmentation(segmentGroupExtension, name);
+      return (
+        !isSegmentation(segmentGroupExtension, name) &&
+        !isSegmentation(layerExtension, name)
+      );
     });
 
   if (baseImages.length) return baseImages[0];
@@ -138,13 +149,18 @@ function getStudyUID(volumeID: string) {
 
 function findBaseDataSource(
   succeeded: Array<ImportResult>,
-  segmentGroupExtension: string
+  segmentGroupExtension: string,
+  layerExtension: string
 ) {
   const loadableDataSources = filterLoadableDataSources(succeeded);
   const baseDicom = findBaseDicom(loadableDataSources);
   if (baseDicom) return baseDicom;
 
-  const baseImage = findBaseImage(loadableDataSources, segmentGroupExtension);
+  const baseImage = findBaseImage(
+    loadableDataSources,
+    segmentGroupExtension,
+    layerExtension
+  );
   if (baseImage) return baseImage;
   return loadableDataSources[0];
 }
@@ -164,7 +180,7 @@ function filterOtherVolumesInStudy(
 }
 
 // Layers a DICOM PET on a CT if found
-function loadLayers(
+function autoLayerDicoms(
   primaryDataSource: LoadableVolumeResult,
   succeeded: Array<ImportResult>
 ) {
@@ -190,6 +206,28 @@ function loadLayers(
   layersStore.addLayer(primarySelection, layerSelection);
 }
 
+function autoLayerByName(
+  primaryDataSource: LoadableVolumeResult,
+  succeeded: Array<ImportResult>,
+  layerExtension: string
+) {
+  if (isDicomImage(primaryDataSource.dataID)) return;
+  const matchingLayers = filterMatchingNames(
+    primaryDataSource,
+    succeeded,
+    layerExtension
+  )
+    .filter(isVolumeResult)
+    .sort(sortByDataSourceName);
+
+  const primarySelection = toDataSelection(primaryDataSource);
+  const layersStore = useLayersStore();
+  matchingLayers.forEach((ds) => {
+    const layerSelection = toDataSelection(ds);
+    layersStore.addLayer(primarySelection, layerSelection);
+  });
+}
+
 // Loads other DataSources as Segment Groups:
 // - DICOM SEG modalities with matching StudyUIDs.
 // - DataSources that have a name like foo.segmentation.bar and the primary DataSource is named foo.baz
@@ -202,9 +240,11 @@ function loadSegmentations(
     primaryDataSource,
     succeeded,
     segmentGroupExtension
-  ).filter(
-    isVolumeResult // filter out models
-  );
+  )
+    .filter(
+      isVolumeResult // filter out models
+    )
+    .sort(sortByDataSourceName);
 
   const dicomStore = useDICOMStore();
   const otherSegVolumesInStudy = filterOtherVolumesInStudy(
@@ -226,20 +266,33 @@ function loadSegmentations(
   });
 }
 
-function loadDataSources(sources: DataSource[]) {
-  const load = async () => {
-    const loadDataStore = useLoadDataStore();
-    const dataStore = useDatasetStore();
+type DataSourceImporter = (
+  sources: DataSource[]
+) => Promise<ImportDataSourcesResult[]>;
 
+type LoadDataSourcesOutcome = {
+  datasetIds: string[];
+  hadErrors: boolean;
+  completed: boolean;
+};
+
+function loadDataSourcesWithOutcome(
+  sources: DataSource[],
+  importer: DataSourceImporter
+): Promise<LoadDataSourcesOutcome> {
+  const loadDataStore = useLoadDataStore();
+  const viewStore = useViewStore();
+
+  const load = async () => {
     let results: ImportDataSourcesResult[];
     try {
-      results = (await importDataSources(sources)).filter((result) =>
+      results = (await importer(sources)).filter((result) =>
         // only look at data and error results
         ['data', 'error'].includes(result.type)
       );
     } catch (error) {
       loadDataStore.setError(error as Error);
-      return;
+      return { datasetIds: [], hadErrors: true, completed: false };
     }
 
     const [succeeded, errored] = partition(
@@ -247,29 +300,42 @@ function loadDataSources(sources: DataSource[]) {
       results
     );
 
-    if (!dataStore.primarySelection && succeeded.length) {
+    const shouldShowData = viewStore
+      .getAllViews()
+      .every((view) => !view.dataID);
+
+    if (succeeded.length && shouldShowData) {
       const primaryDataSource = findBaseDataSource(
         succeeded,
-        loadDataStore.segmentGroupExtension
+        loadDataStore.segmentGroupExtension,
+        loadDataStore.layerExtension
       );
 
       if (isVolumeResult(primaryDataSource)) {
         const selection = toDataSelection(primaryDataSource);
-        dataStore.setPrimarySelection(selection);
-        loadLayers(primaryDataSource, succeeded);
+        viewStore.setDataForAllViews(selection);
+        autoLayerDicoms(primaryDataSource, succeeded);
+        autoLayerByName(
+          primaryDataSource,
+          succeeded,
+          loadDataStore.layerExtension
+        );
         loadSegmentations(
           primaryDataSource,
           succeeded,
           loadDataStore.segmentGroupExtension
         );
-      } // then must be primaryDataSource.type === 'model'
+      } // else must be primaryDataSource.type === 'model', which are not dealt with here yet
     }
 
+    // Every error importDataSources returns is unreported by contract
+    // (failures it already surfaced itself — e.g. in the restore's
+    // consolidated notice — come back as 'ok' results), so all of them get
+    // the generic load error here.
     if (errored.length) {
       const errorMessages = (errored as ErrorResult[]).map((errResult) => {
         const { dataSource, error } = errResult;
         const name = getDataSourceName(dataSource);
-        // log error for debugging
         logError(error);
         return error.message ? `- ${name}: ${error.message}` : `- ${name}`;
       });
@@ -279,14 +345,23 @@ function loadDataSources(sources: DataSource[]) {
 
       loadDataStore.setError(failedError);
     }
+    return {
+      datasetIds: filterLoadableDataSources(succeeded).map(
+        (result) => result.dataID
+      ),
+      hadErrors: errored.length > 0,
+      completed: true,
+    };
   };
 
-  const wrapWithLoading = <T extends (...args: any[]) => void>(fn: T) => {
+  const wrapWithLoading = <Args extends unknown[], Result>(
+    fn: (...args: Args) => Promise<Result>
+  ) => {
     const { startLoading, stopLoading } = useLoadDataStore();
-    return async function wrapper(...args: any[]) {
+    return async function wrapper(...args: Args): Promise<Result> {
       try {
         startLoading();
-        await fn(...args);
+        return await fn(...args);
       } finally {
         stopLoading();
       }
@@ -294,6 +369,18 @@ function loadDataSources(sources: DataSource[]) {
   };
 
   return wrapWithLoading(load)();
+}
+
+export function loadDataSources(sources: DataSource[]) {
+  return loadDataSourcesWithOutcome(sources, importDataSources).then(
+    ({ datasetIds, completed }) => (completed ? datasetIds : undefined)
+  );
+}
+
+export function loadVolumeDataSources(sources: DataSource[]) {
+  return loadDataSourcesWithOutcome(sources, importVolumeDataSources).then(
+    ({ datasetIds, completed }) => (completed ? datasetIds : undefined)
+  );
 }
 
 export function openFileDialog() {
@@ -320,17 +407,53 @@ export async function loadUserPromptedFiles() {
   return loadFiles(files);
 }
 
-export async function loadUrls(params: UrlParams) {
-  const urls = wrapInArray(params.urls);
-  const names = wrapInArray(params.names ?? []); // optional names should resolve to [] if params.names === undefined
-  const sources = urls.map((url, idx) =>
-    uriToDataSource(
-      url,
-      names[idx] ||
-        basename(parseUrl(url, window.location.href).pathname) ||
-        url
-    )
-  );
+function urlsToDataSources(urls: string[], names: string[] = []): DataSource[] {
+  return urls.map((url, idx) => {
+    const defaultName =
+      basename(parseUrl(url, window.location.href).pathname) || url;
+    return uriToDataSource(url, names[idx] || defaultName);
+  });
+}
 
-  return loadDataSources(sources);
+type LoadUrlsParams = {
+  urls?: string[];
+  names?: string[];
+  config?: string[];
+};
+
+export async function loadUrls(params: UrlParams | LoadUrlsParams) {
+  return (await loadUrlsWithOutcome(params)).datasetIds;
+}
+
+export async function loadUrlsWithOutcome(
+  params: UrlParams | LoadUrlsParams
+): Promise<Pick<LoadDataSourcesOutcome, 'datasetIds' | 'hadErrors'>> {
+  const outcomes: LoadDataSourcesOutcome[] = [];
+  if (params.config) {
+    const configUrls = wrapInArray(params.config);
+    const configSources = urlsToDataSources(configUrls, []);
+    outcomes.push(
+      await loadDataSourcesWithOutcome(configSources, importDataSources)
+    );
+  }
+
+  if (params.urls) {
+    const urls = wrapInArray(params.urls);
+    const names = wrapInArray(params.names ?? []);
+    const sources = urlsToDataSources(urls, names);
+    outcomes.push(await loadDataSourcesWithOutcome(sources, importDataSources));
+  }
+  return {
+    datasetIds: outcomes.flatMap(({ datasetIds }) => datasetIds),
+    hadErrors: outcomes.some(({ hadErrors }) => hadErrors),
+  };
+}
+
+export async function loadVolumeUrls(
+  params: Pick<LoadUrlsParams, 'urls' | 'names'>
+) {
+  if (!params.urls) return [];
+  const urls = wrapInArray(params.urls);
+  const names = wrapInArray(params.names ?? []);
+  return (await loadVolumeDataSources(urlsToDataSources(urls, names))) ?? [];
 }

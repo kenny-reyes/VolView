@@ -15,12 +15,12 @@ import { VtkViewApi } from '@/src/types/vtk-types';
 import { VtkViewContext } from '@/src/components/vtk/context';
 import { useViewCameraStore } from '@/src/store/view-configs/camera';
 
-interface Props {
+type Props = {
   viewId: string;
   imageId: Maybe<string>;
   viewDirection: LPSAxisDir;
   viewUp: LPSAxisDir;
-}
+};
 
 const props = defineProps<Props>();
 const {
@@ -55,13 +55,11 @@ const { interactorStyle } = useVtkInteractorStyle(
 
 // bind slice and window configs
 // resizeToFit camera controls
-const { autoFit, withoutAutoFitEffect } = useAutoFitState(
-  view.renderer.getActiveCamera()
-);
+const autoFit = useAutoFitState(view.renderer.getActiveCamera());
 
 function autoFitImage() {
-  if (!autoFit.value) return;
-  withoutAutoFitEffect(() => {
+  if (!autoFit.autoFit.value) return;
+  autoFit.withPaused(() => {
     resizeToFitImage(
       view,
       imageMetadata.value,
@@ -77,8 +75,8 @@ useResizeObserver(vtkContainerRef, () => {
 });
 
 function resetCamera() {
-  autoFit.value = true;
-  withoutAutoFitEffect(() => {
+  autoFit.autoFit.value = true;
+  autoFit.withPaused(() => {
     resetCameraToImage(
       view,
       imageMetadata.value,
@@ -89,6 +87,26 @@ function resetCamera() {
   });
 }
 
+watchImmediate(
+  [viewID, imageID, disableCameraAutoReset],
+  ([viewID_, imageID_, noAutoReset]) => {
+    if (
+      imageID_ &&
+      !viewCameraStore.isCameraInitialized(viewID_, imageID_) &&
+      !noAutoReset
+    ) {
+      resetCamera();
+      viewCameraStore.markCameraAsInitialized(viewID_, imageID_);
+    }
+  }
+);
+
+// Must run before the clipping-range watcher below: resetCameraClippingRange
+// computes near/far from the camera's current position, so on remount the
+// saved position must be syncRef'd back first or the slice falls outside
+// the clip volume and the canvas goes black.
+usePersistCameraConfig(viewID, imageID, view.renderer.getActiveCamera());
+
 watchImmediate([imageMetadata, disableCameraAutoReset], () => {
   if (!imageMetadata.value) return;
   if (
@@ -96,14 +114,8 @@ watchImmediate([imageMetadata, disableCameraAutoReset], () => {
     disableCameraAutoReset.value
   ) {
     view.renderer.resetCameraClippingRange(imageMetadata.value.worldBounds);
-    return;
   }
-  resetCamera();
-  viewCameraStore.markCameraAsInitialized(viewID.value, imageID.value);
 });
-
-// persistent camera config
-usePersistCameraConfig(viewID, imageID, view.renderer.getActiveCamera());
 
 // exposed API
 const api: VtkViewApi = markRaw({
@@ -114,8 +126,31 @@ const api: VtkViewApi = markRaw({
 
 defineExpose(api);
 provide(VtkViewContext, api);
+
+function onPointerDown() {
+  autoFit.resume();
+}
+
+function onPointerUp() {
+  autoFit.pause();
+}
 </script>
 
 <template>
-  <div ref="vtkContainerRef"><slot></slot></div>
+  <div>
+    <div
+      ref="vtkContainerRef"
+      class="view"
+      @pointerdown.capture="onPointerDown"
+      @pointerup.capture="onPointerUp"
+    />
+    <slot></slot>
+  </div>
 </template>
+
+<style scoped>
+.view {
+  width: 100%;
+  height: 100%;
+}
+</style>

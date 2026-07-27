@@ -14,11 +14,12 @@ import { InterpolationType } from '@kitware/vtk.js/Rendering/Core/ImageProperty/
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction';
 import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
 import { vtkFieldRef } from '@/src/core/vtk/vtkFieldRef';
-import { syncRef } from '@vueuse/core';
+import { watchImmediate } from '@vueuse/core';
+import { convertSliceIndex } from '@/src/utils/imageSpace';
+import { getLPSDirections } from '@/src/utils/lps';
 import { useSliceConfig } from '@/src/composables/useSliceConfig';
 import useLayerColoringStore from '@/src/store/view-configs/layers';
 import { useSegmentGroupConfigStore } from '@/src/store/view-configs/segmentGroups';
-import { useSegmentGroupConfigInitializer } from '@/src/composables/useSegmentGroupConfigInitializer';
 
 interface Props {
   viewId: string;
@@ -48,6 +49,9 @@ onVTKEvent(imageData, 'onModified', () => {
 // setup slice rep
 const sliceRep = useSliceRepresentation(view, imageData);
 
+// Let widget fill representations be picked through the segment overlay
+sliceRep.actor.setPickable(false);
+
 sliceRep.property.setRGBTransferFunction(
   0,
   vtkColorTransferFunction.newInstance()
@@ -61,7 +65,6 @@ sliceRep.property.setUseLookupTableScalarRange(true);
 sliceRep.mapper.setResolveCoincidentTopologyToPolygonOffset();
 sliceRep.mapper.setRelativeCoincidentTopologyPolygonOffsetParameters(-4, -4);
 
-useSegmentGroupConfigInitializer(viewId.value, segmentationId.value);
 const coloringStore = useLayerColoringStore();
 
 // visibility
@@ -88,17 +91,42 @@ watchEffect(() => {
 const parentImageId = computed(() => metadata.value?.parentImage);
 const { metadata: parentMetadata } = useImage(parentImageId);
 
+// Compute segment group's LPS orientation from its direction matrix
+const segmentGroupLpsOrientation = computed(() => {
+  const segmentGroup = imageData.value;
+  if (!segmentGroup) return null;
+  return getLPSDirections(segmentGroup.getDirection());
+});
+
+// Set slicing mode based on segment group's own orientation
 watchEffect(() => {
-  const { lpsOrientation } = parentMetadata.value;
+  const lpsOrientation = segmentGroupLpsOrientation.value;
+  if (!lpsOrientation) return;
   const ijkIndex = lpsOrientation[axis.value];
   const mode = [SlicingMode.I, SlicingMode.J, SlicingMode.K][ijkIndex];
   sliceRep.mapper.setSlicingMode(mode);
 });
 
-// sync slicing
+// sync slicing - convert parent slice to segment group slice via world coordinates
 const slice = vtkFieldRef(sliceRep.mapper, 'slice');
 const { slice: storedSlice } = useSliceConfig(viewId, parentImageId);
-syncRef(storedSlice, slice, { immediate: true });
+
+watchImmediate(
+  [storedSlice, segmentGroupLpsOrientation, parentMetadata],
+  () => {
+    const parentImage = parentMetadata.value;
+    const segmentGroup = imageData.value;
+    if (!parentImage || !segmentGroup || storedSlice.value == null) return;
+
+    slice.value = convertSliceIndex(
+      storedSlice.value,
+      parentImage.lpsOrientation,
+      parentImage.indexToWorld,
+      segmentGroup,
+      axis.value
+    );
+  }
+);
 
 // set coloring properties
 const applySegmentColoring = () => {

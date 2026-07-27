@@ -1,18 +1,15 @@
-import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import { defineStore } from 'pinia';
-import { computed, ref, shallowRef } from 'vue';
-import {
-  isDicomImage,
-  isRegularImage,
-  type DataSelection,
-} from '@/src/utils/dataSelection';
-import { DataSource } from '@/src/io/import/dataSource';
-import { useImageCacheStore } from '@/src/store/image-cache';
-import { useDICOMStore } from './datasets-dicom';
-import { useImageStore } from './datasets-images';
-import * as Schema from '../io/state-file/schema';
-import { useLayersStore } from './datasets-layers';
-import { useModelStore } from './datasets-models';
+import { computed, shallowRef } from 'vue';
+import { isRegularImage } from '@/src/utils/dataSelection';
+import { DataSource, isRemoteDataSource } from '@/src/io/import/dataSource';
+import { useDICOMStore } from '@/src/store/datasets-dicom';
+import { useImageStore } from '@/src/store/datasets-images';
+import * as Schema from '@/src/io/state-file/schema';
+import { useLayersStore } from '@/src/store/datasets-layers';
+import { useModelStore } from '@/src/store/datasets-models';
+import { useViewConfigStore } from '@/src/store/view-configs';
+import { useImageStatsStore } from '@/src/store/image-stats';
+import { Tags } from '@/src/core/dicomTags';
 
 export const DataType = {
   Image: 'Image',
@@ -22,6 +19,75 @@ export const DataType = {
 interface LoadedData {
   dataID: string;
   dataSource: DataSource;
+}
+
+function sourceIdentity(dataSource: DataSource): string | undefined {
+  if (dataSource.type === 'chunk') {
+    const sopInstanceUID = dataSource.chunk.metadata
+      ?.find(([tag]) => tag === Tags.SOPInstanceUID)?.[1]
+      ?.trim();
+    if (sopInstanceUID) return `dicom:${sopInstanceUID}`;
+  }
+
+  if (dataSource.type === 'uri') return `uri:${dataSource.uri}`;
+  if (dataSource.type === 'archive') {
+    const parent = sourceIdentity(dataSource.parent);
+    return parent ? `archive:${parent}:${dataSource.path}` : undefined;
+  }
+  if (dataSource.type === 'file') {
+    if (dataSource.parent) return sourceIdentity(dataSource.parent);
+    const relativePath = dataSource.file.webkitRelativePath || '';
+    return [
+      'file',
+      relativePath,
+      dataSource.file.name,
+      dataSource.file.size,
+      dataSource.file.lastModified,
+      dataSource.file.type,
+    ].join(':');
+  }
+  if (dataSource.parent) return sourceIdentity(dataSource.parent);
+  return undefined;
+}
+
+function mergeCollectionSources(
+  existing: DataSource,
+  incoming: DataSource
+): DataSource {
+  if (existing.type !== 'collection' || incoming.type !== 'collection') {
+    return isRemoteDataSource(incoming) && !isRemoteDataSource(existing)
+      ? incoming
+      : existing;
+  }
+
+  const merged: DataSource[] = [];
+  const indexByIdentity = new Map<string, number>();
+  const seenByReference = new Set<DataSource>();
+
+  [...existing.sources, ...incoming.sources].forEach((source) => {
+    const identity = sourceIdentity(source);
+    if (identity === undefined) {
+      if (!seenByReference.has(source)) {
+        seenByReference.add(source);
+        merged.push(source);
+      }
+      return;
+    }
+
+    const existingIndex = indexByIdentity.get(identity);
+    if (existingIndex === undefined) {
+      indexByIdentity.set(identity, merged.length);
+      merged.push(source);
+      return;
+    }
+
+    const kept = merged[existingIndex];
+    if (isRemoteDataSource(source) && !isRemoteDataSource(kept)) {
+      merged[existingIndex] = source;
+    }
+  });
+
+  return { type: 'collection', sources: merged };
 }
 
 function createIdGenerator() {
@@ -129,37 +195,15 @@ function serializeLoadedData(loadedDataSources: Array<LoadedData>) {
 
 export const useDatasetStore = defineStore('dataset', () => {
   const imageStore = useImageStore();
-  const imageCacheStore = useImageCacheStore();
   const dicomStore = useDICOMStore();
   const layersStore = useLayersStore();
   const modelStore = useModelStore();
 
   // --- state --- //
 
-  const primarySelection = ref<DataSelection | null>(null);
   const loadedData = shallowRef<Array<LoadedData>>([]);
 
   // --- getters --- //
-
-  const primaryImageID = primarySelection;
-
-  const primaryDataset = computed<vtkImageData | null>(() => {
-    try {
-      if (!primaryImageID.value) {
-        return null;
-      }
-
-      const cacheEntry = imageCacheStore.imageById[primaryImageID.value];
-      if (!cacheEntry || typeof cacheEntry.getVtkImageData !== 'function') {
-        return null;
-      }
-
-      return cacheEntry.getVtkImageData() || null;
-    } catch (e) {
-      console.warn('MVET VolView: error calculating primaryDataset', e);
-      return null;
-    }
-  });
 
   const idsAsSelections = computed(() => {
     const volumeKeys = Object.keys(dicomStore.volumeInfo);
@@ -167,11 +211,18 @@ export const useDatasetStore = defineStore('dataset', () => {
     return [...volumeKeys, ...images];
   });
 
-  // --- actions --- //
+  // Provenance lookup by dataset id: the loaded volume's `DataSource` (its
+  // parent chain records where every byte came from). The input mint
+  // reads this to author a bound input's verbatim URIs; a volume with no URI
+  // ancestor here is not bindable. Returns undefined for an unknown id.
+  const dataSourceByID = computed(
+    () => new Map(loadedData.value.map((d) => [d.dataID, d.dataSource]))
+  );
+  const getDataSource = (
+    id: string | null | undefined
+  ): DataSource | undefined => (id ? dataSourceByID.value.get(id) : undefined);
 
-  function setPrimarySelection(sel: DataSelection | null) {
-    primarySelection.value = sel;
-  }
+  // --- actions --- //
 
   async function serialize(stateFile: Schema.StateFile) {
     const { manifest, zip } = stateFile;
@@ -187,33 +238,28 @@ export const useDatasetStore = defineStore('dataset', () => {
     manifest.dataSources = serializedDependencies;
 
     // add any locally loaded files
-    manifest.datasetFilePath = {};
-    Object.entries(files).forEach(([fileId, file]) => {
-      const filePath = `data/${fileId}/${file.name}`;
-      zip.file(filePath, file);
-      manifest.datasetFilePath[fileId] = filePath;
-    });
-
-    if (primarySelection.value) {
-      manifest.primarySelection = primarySelection.value;
+    if (Object.keys(files).length > 0) {
+      manifest.datasetFilePath = {};
+      Object.entries(files).forEach(([fileId, file]) => {
+        const filePath = `data/${fileId}/${file.name}`;
+        zip.file(filePath, file);
+        manifest.datasetFilePath![fileId] = filePath;
+      });
     }
   }
 
   const remove = (id: string | null) => {
     if (!id) return;
-
-    if (id === primarySelection.value) {
-      primarySelection.value = null;
-    }
-
-    if (isDicomImage(id)) {
-      dicomStore.deleteVolume(id);
-    }
-    imageStore.deleteData(id);
-
-    layersStore.remove(id);
-
+    // Prune the provenance entry too, or `serialize` re-emits the removed
+    // dataset (e.g. the temp dataset a segment group consumed at restore) as a
+    // dangling manifest entry that a later restore fetches as a visible
+    // Anonymous volume.
     loadedData.value = loadedData.value.filter((d) => d.dataID !== id);
+    dicomStore.deleteVolume(id);
+    imageStore.deleteData(id);
+    layersStore.remove(id);
+    useViewConfigStore().removeData(id);
+    useImageStatsStore().removeData(id);
   };
 
   const removeAll = () => {
@@ -230,16 +276,30 @@ export const useDatasetStore = defineStore('dataset', () => {
   };
 
   function addDataSources(sources: Array<LoadedData>) {
-    loadedData.value.push(...sources);
+    // Re-importing the same data yields the same dataID (e.g. the same DICOM
+    // series dragged in twice). Keep one dataset entry while merging distinct
+    // collection members so incremental imports retain every slice. Duplicate
+    // DICOM instances are keyed by SOP Instance UID, preferring remote
+    // provenance when both local and remote forms are available.
+    const byId = new Map(loadedData.value.map((d) => [d.dataID, d]));
+    sources.forEach((d) => {
+      const existing = byId.get(d.dataID);
+      if (!existing) {
+        byId.set(d.dataID, d);
+        return;
+      }
+      byId.set(d.dataID, {
+        dataID: d.dataID,
+        dataSource: mergeCollectionSources(existing.dataSource, d.dataSource),
+      });
+    });
+    loadedData.value = [...byId.values()];
   }
 
   return {
-    primaryImageID,
-    primarySelection,
-    primaryDataset,
     idsAsSelections,
+    getDataSource,
     addDataSources,
-    setPrimarySelection,
     serialize,
     remove,
     removeAll,

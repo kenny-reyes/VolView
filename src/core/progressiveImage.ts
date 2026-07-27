@@ -1,4 +1,3 @@
-/* eslint-disable max-classes-per-file */
 import { computed, effectScope, ref, Ref } from 'vue';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import { ImageMetadata } from '@/src/types/image';
@@ -17,7 +16,7 @@ export type ProgressiveImageEvents = {
   error: Error;
 };
 
-export interface ProgressiveImage {
+export type ProgressiveImage = {
   /**
    * A new vtkImageData may be returned at any time while this image is incomplete.
    */
@@ -28,6 +27,10 @@ export interface ProgressiveImage {
   getStatus(): ProgressiveImageStatus;
   isLoading(): boolean;
   isLoaded(): boolean;
+  // Returns a data-URI thumbnail, or null if this image has no thumbnail.
+  // The base implementation returns null so consumers can call this on any
+  // ProgressiveImage without type-narrowing.
+  getThumbnail(): Promise<string | null>;
   addEventListener<T extends keyof ProgressiveImageEvents>(
     type: T,
     callback: (info: ProgressiveImageEvents[T]) => void
@@ -46,7 +49,11 @@ export interface ProgressiveImage {
   vtkImageData: Ref<vtkImageData>;
   imageMetadata: Ref<ImageMetadata>;
   name: Ref<string>;
-}
+  // File-format header fields (e.g. NRRD key/value pairs) carried from the
+  // reader; undefined when the source format has none. Consumers that know a
+  // convention parse them (see `parseSegNrrdMetadata`).
+  headerMetadata?: Map<string, string>;
+};
 
 export const defaultImageMetadata = (): ImageMetadata => ({
   name: NO_NAME,
@@ -110,6 +117,7 @@ export abstract class BaseProgressiveImage implements ProgressiveImage {
   public vtkImageData: Ref<vtkImageData>;
   public imageMetadata: Ref<ImageMetadata>;
   public name: Ref<string>;
+  public headerMetadata?: Map<string, string>;
   private cleanupListeners: () => void;
 
   constructor() {
@@ -163,6 +171,10 @@ export abstract class BaseProgressiveImage implements ProgressiveImage {
     this.cleanupListeners();
   }
 
+  getThumbnail(): Promise<string | null> {
+    return Promise.resolve(null);
+  }
+
   abstract startLoad(): void;
 
   abstract stopLoad(): void;
@@ -192,8 +204,6 @@ export class LoadedVtkImage extends BaseProgressiveImage {
     super.dispose();
     this.vtkImageData.value.delete();
   }
-
-  /* eslint-disable class-methods-use-this */
 
   startLoad(): void {
     // noop

@@ -14,7 +14,10 @@ export function useMouseRangeManipulatorListener(
   type: ListenerType,
   range: MaybeRef<Maybe<[number, number]>>,
   step: MaybeRef<Maybe<number>>,
-  initialValue?: number
+  initialValue?: number,
+  scale: number = 1, // Negative scale inverts scroll direction
+  // Fires on real wheel/drag input only, not on programmatic writes.
+  onUserInput?: () => void
 ) {
   const internalValue = ref(initialValue ?? 0);
 
@@ -37,7 +40,9 @@ export function useMouseRangeManipulatorListener(
         () => internalValue.value,
         (val) => {
           internalValue.value = val;
-        }
+          onUserInput?.();
+        },
+        scale
       );
 
       onCleanup(() => {

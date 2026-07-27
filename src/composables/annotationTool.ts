@@ -53,14 +53,26 @@ export const doesToolFrameMatchViewAxis = <Tool extends AnnotationTool>(
 
 export const useCurrentTools = <S extends AnnotationToolStore>(
   toolStore: S,
-  viewAxis: Ref<LPSAxis>
+  viewAxis: Ref<LPSAxis>,
+  placingToolWhitelist: Ref<Array<ToolID>>,
+  // For cine: the current frame. A tool matches when its own frame matches
+  // or is unset (volume tools have no frame). Pass undefined on volume views.
+  viewFrame?: MaybeRef<Maybe<number>>
 ) => {
   const { currentImageID, currentImageMetadata } = useCurrentImage();
   return computed(() => {
     const curImageID = currentImageID.value;
+    const frame = unref(viewFrame);
 
     type ToolType = S['tools'][number];
     return (toolStore.tools as Array<ToolType>).filter((tool) => {
+      // ensure that we don't show placing tools from other views
+      if (tool.placing && !placingToolWhitelist.value.includes(tool.id))
+        return false;
+
+      if (frame != null && tool.frame != null && tool.frame !== frame)
+        return false;
+
       // only show tools for the current image,
       // current view axis and not hidden
       return (
@@ -186,20 +198,21 @@ export const useHover = (
 
   watch(synchronousOverlayInfo, resetOverlay);
 
-  const overlayInfo = computed(() =>
-    showOverlay.value
-      ? synchronousOverlayInfo.value
-      : ({ visible: false } as Info)
-  );
-
   const toolStore = useToolStore();
-  const noInfoWithoutSelect = computed(() => {
-    if (toolStore.currentTool !== Tools.Select)
+  const TOOLS_WITH_HOVER = [
+    Tools.Select,
+    Tools.Ruler,
+    Tools.Rectangle,
+    Tools.Polygon,
+  ];
+  const overlayInfo = computed(() => {
+    if (!showOverlay.value) return { visible: false } as Info;
+    if (!TOOLS_WITH_HOVER.includes(toolStore.currentTool))
       return { visible: false } as Info;
-    return overlayInfo.value;
+    return synchronousOverlayInfo.value;
   });
 
-  return { overlayInfo: noInfoWithoutSelect, onHover };
+  return { overlayInfo, onHover };
 };
 
 export const usePlacingAnnotationTool = (

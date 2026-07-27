@@ -2,22 +2,150 @@
 
 By loading a JSON file, you can set VolView's configuration:
 
-- Starting view layout (Axial Only, 3D Primary, etc).
+- View layouts (grid size, view types, or hierarchical layouts)
+- Disabled view types
 - Labels for tools
 - Visibility of Sample Data section
 - Keyboard shortcuts
 
-## Starting view layout
+## Loading Configuration Files
 
-The `activeLayout` key has options (Axial Only, 3D Primary, etc.) defined in `config.ts`
+Use the `config` URL parameter to load configuration before data files:
+
+```
+https://volview.kitware.com/?config=https://example.com/config.json&urls=https://example.com/data.nrrd
+```
+
+## View Layouts
+
+Define one or more named layouts using the `layouts` key. VolView will use the first layout as the default. Each named layout will be in the layout selector menu. Layout are specified in three formats:
+
+### 1. Grid with View Types (2D String Array)
+
+Use a 2D array of view type strings to specify both the grid layout and which views appear in each position:
 
 ```json
 {
-  "layout": {
-    "activeLayout": "Axial Only"
+  "layouts": {
+    "Four Up": [
+      ["axial", "coronal"],
+      ["sagittal", "volume"]
+    ]
   }
 }
 ```
+
+Available view type strings: `"axial"`, `"coronal"`, `"sagittal"`, `"volume"`, `"oblique"`
+
+### 2. Simple Grid (gridSize)
+
+Use `gridSize` to set the layout grid as `[width, height]`. For example, `[2, 2]` creates a 2x2 grid of views:
+
+```json
+{
+  "layouts": {
+    "Four by Four": {
+      "gridSize": [2, 2]
+    }
+  }
+}
+```
+
+### 3. Nested Hierarchical Layout
+
+For complex layouts, use a nested structure with full control over view placement and properties:
+
+```json
+{
+  "layouts": {
+    "Volume Primary": {
+      "direction": "row",
+      "items": [
+        "volume",
+        {
+          "direction": "column",
+          "items": ["axial", "coronal", "sagittal"]
+        }
+      ]
+    }
+  }
+}
+```
+
+Direction values:
+
+- `"row"` - items arranged horizontally
+- `"column"` - items stacked vertically
+
+You can also specify full view objects with custom options:
+
+```json
+{
+  "layouts": {
+    "Custom 3D Orientation": {
+      "direction": "column",
+      "items": [
+        {
+          "type": "3D",
+          "name": "Top View",
+          "viewDirection": "Superior",
+          "viewUp": "Anterior"
+        },
+        {
+          "direction": "row",
+          "items": [
+            { "type": "2D", "orientation": "Axial" },
+            { "type": "2D", "orientation": "Coronal" }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+View object properties:
+
+- 2D views: `type: "2D"`, `orientation: "Axial" | "Coronal" | "Sagittal"`, `name` (optional)
+- 3D views: `type: "3D"`, `viewDirection` (optional), `viewUp` (optional), `name` (optional)
+- Oblique views: `type: "Oblique"`, `name` (optional)
+
+### Multiple Layouts Example
+
+You can define multiple named layouts that users can switch between:
+
+```json
+{
+  "layouts": {
+    "Four up": [
+      ["axial", "coronal"],
+      ["sagittal", "volume"]
+    ],
+    "Volume focus": {
+      "direction": "row",
+      "items": [
+        "volume",
+        {
+          "direction": "column",
+          "items": ["axial", "coronal", "sagittal"]
+        }
+      ]
+    }
+  }
+}
+```
+
+## Disabled View Types
+
+Use `disabledViewTypes` to prevent certain view types from being available in the view type switcher:
+
+```json
+{
+  "disabledViewTypes": ["3D", "Oblique"]
+}
+```
+
+This removes the specified view types from the dropdown menu and replaces them in the default layout with allowed types. Valid values: `"2D"`, `"3D"`, `"Oblique"`
 
 ## Labels for tools
 
@@ -53,20 +181,45 @@ Working segment group file formats:
 
 hdf5, iwi.cbor, mha, nii, nii.gz, nrrd, vtk
 
-## Automatic Segment Groups by File Name
+## Automatic Layers and Segment Groups by File Name
 
-When loading files, VolView can automatically convert images to segment groups
-if they follow a naming convention. For example, an image with name like `foo.segmentation.bar`
-will be converted to a segment group for a base image named like `foo.baz`.  
-The `segmentation` extension is defined by the `io.segmentGroupExtension` key, which takes a
-string. Files `foo.[segmentGroupExtension].bar` will be automatilly converted to segment groups for a base image named `foo.baz`. The default is `''` and will disable the feature.
+When loading multiple files, VolView can automatically associate related images based on file naming patterns.
+Example: `base.[extension].nrrd` will match `base.nii`.
 
-This will define `myFile.seg.nrrd` as a segment group for a `myFile.nii` base file.
+The extension must appear anywhere in the filename after splitting by dots, and the filename must start with the same prefix as the base image (everything before the first dot). Files matching `base.[extension]...` will be associated with a base image named `base.*`.
+
+**Ordering:** When multiple layers/segment groups match a base image, they are sorted alphabetically by filename and added to the stack in that order. To control the stacking order explicitly, you could use numeric prefixes in your filenames.
+
+For example, with a base image `patient001.nrrd`:
+
+- Layers (sorted alphabetically): `patient001.layer.1.pet.nii`, `patient001.layer.2.ct.mha`, `patient001.layer.3.overlay.vtk`
+- Segment groups: `patient001.seg.1.tumor.nii.gz`, `patient001.seg.2.lesion.mha`
+
+Both features default to `''` which disables them.
+
+### Segment Groups
+
+Use `segmentGroupExtension` to automatically convert matching non-DICOM images to segment groups.
+For example, `myFile.seg.nrrd` becomes a segment group for `myFile.nii`.
+Defaults to `''` which disables matching.
 
 ```json
 {
   "io": {
     "segmentGroupExtension": "seg"
+  }
+}
+```
+
+### Layering
+
+Use `layerExtension` to automatically layer matching non-DICOM images on top of the base image. For example, `myImage.layer.nii` is layered on top of `myImage.nii`.
+Defaults to `''` which disables matching.
+
+```json
+{
+  "io": {
+    "layerExtension": "layer"
   }
 }
 ```
@@ -87,18 +240,6 @@ To configure a key for an action, add its action name and the key(s) under the `
 }
 ```
 
-## Visibility of Sample Data section
-
-Simplify the data browser by hiding the Sample Data expandable section.
-
-```json
-{
-  "dataBrowser": {
-    "hideSampleData": false
-  }
-}
-```
-
 ## Example JSON:
 
 ```json
@@ -109,8 +250,10 @@ Simplify the data browser by hiding the Sample Data expandable section.
       "tumor": { "color": "green", "strokeWidth": 3 }
     }
   },
-  "layout": {
-    "activeLayout": "Axial Only"
+  "layouts": {
+    "single-view": {
+      "gridSize": [1, 1]
+    }
   }
 }
 ```
@@ -142,9 +285,23 @@ Simplify the data browser by hiding the Sample Data expandable section.
       "poly2Label": { "color": "green" }
     }
   },
-  "layout": {
-    "activeLayout": "Axial Only"
+  "layouts": {
+    "Volume primary": {
+      "direction": "row",
+      "items": [
+        "volume",
+        {
+          "direction": "column",
+          "items": ["axial", "coronal", "sagittal"]
+        }
+      ]
+    },
+    "Four up": [
+      ["axial", "coronal"],
+      ["sagittal", "volume"]
+    ]
   },
+  "disabledViewTypes": ["Oblique"],
   "dataBrowser": {
     "hideSampleData": false
   },
@@ -153,7 +310,9 @@ Simplify the data browser by hiding the Sample Data expandable section.
     "showKeyboardShortcuts": "t"
   },
   "io": {
-    "segmentGroupSaveFormat": "nrrd"
+    "segmentGroupSaveFormat": "nrrd",
+    "segmentGroupExtension": "seg",
+    "layerExtension": "layer"
   }
 }
 ```

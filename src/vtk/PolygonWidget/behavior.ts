@@ -23,6 +23,11 @@ const DOUBLE_CLICK_SLIP_DISTANCE_MAX_SQUARED =
 export default function widgetBehavior(publicAPI: any, model: any) {
   model.classHierarchy.push('vtkPolygonWidgetBehavior');
 
+  const anotherWidgetHasFocus = () =>
+    model._widgetManager
+      .getWidgets()
+      .some((w: any) => w !== publicAPI && w.hasFocus());
+
   const setDragging = (isDragging: boolean) => {
     model._dragging = isDragging;
     publicAPI.invokeDraggingEvent({
@@ -49,6 +54,16 @@ export default function widgetBehavior(publicAPI: any, model: any) {
       selections?.[0]?.getProperties().prop ===
       model.representations[1].getActors()[0]; // line representation is second representation
     return overSegment && !overUnselectedHandle;
+  };
+
+  // Check if mouse is over fill representation (for hover but not interaction)
+  const checkOverFill = () => {
+    const selections = model._widgetManager.getSelections();
+    return (
+      model.representations[2] &&
+      selections?.[0]?.getProperties().prop ===
+        model.representations[2].getActors()[0]
+    );
   };
 
   // support setting per-view widget manipulators
@@ -156,17 +171,23 @@ export default function widgetBehavior(publicAPI: any, model: any) {
   // --------------------------------------------------------------------------
 
   publicAPI.handleLeftButtonPress = (event: vtkMouseEvent) => {
+    if (!model.manipulator) {
+      return macro.VOID;
+    }
+
     const activeWidget = model._widgetManager.getActiveWidget();
 
+    // If not placing and hovering over another widget, don't consume event.
     if (
-      !model.manipulator ||
-      // If hovering over another widget, don't consume event.
-      (activeWidget && activeWidget !== publicAPI)
+      !model.widgetState.getPlacing() &&
+      activeWidget &&
+      activeWidget !== publicAPI
     ) {
       return macro.VOID;
     }
 
-    if (checkOverSegment()) {
+    // Ignore clicks on this widget's segment or fill
+    if (checkOverSegment() || checkOverFill()) {
       return macro.VOID;
     }
 
@@ -176,8 +197,6 @@ export default function widgetBehavior(publicAPI: any, model: any) {
     if (model.widgetState.getPlacing() && manipulator) {
       // Dropping first point?
       if (model.widgetState.getHandles().length === 0) {
-        // update variables used by updateActiveStateHandle
-        model.activeState = model.widgetState.getMoveHandle();
         model._widgetManager.grabFocus(publicAPI);
       }
       updateActiveStateHandle(event);
@@ -194,7 +213,12 @@ export default function widgetBehavior(publicAPI: any, model: any) {
       return macro.EVENT_ABORT;
     }
 
-    if (model.activeState?.getActive() && model.pickable && model.dragable) {
+    if (
+      model.activeState?.getActive() &&
+      model.activeState?.setOrigin &&
+      model.pickable &&
+      model.dragable
+    ) {
       setDragging(true);
       model._apiSpecificRenderWindow.setCursor('grabbing');
       model._interactor.requestAnimation(publicAPI);
@@ -227,13 +251,17 @@ export default function widgetBehavior(publicAPI: any, model: any) {
     // So we can rely on getSelections() to be up to date now
     overUnselectedHandle = false;
 
-    if (model.hasFocus) {
-      model._widgetManager.disablePicking();
+    if (anotherWidgetHasFocus()) {
+      publicAPI.invokeHoverEvent({
+        ...event,
+        hovering: false,
+      });
+      return macro.VOID;
     }
 
     publicAPI.invokeHoverEvent({
       ...event,
-      hovering: !!model.activeState,
+      hovering: !!model.activeState || checkOverFill(),
     });
 
     return macro.VOID;
@@ -315,7 +343,6 @@ export default function widgetBehavior(publicAPI: any, model: any) {
       (model.hasFocus && !model.activeState) ||
       (model.activeState && !model.activeState.getActive())
     ) {
-      // update if mouse hovered over handle/activeState for next onDown
       model._widgetManager.enablePicking();
       model._interactor.render();
     }
@@ -394,13 +421,18 @@ export default function widgetBehavior(publicAPI: any, model: any) {
   };
 
   publicAPI.handleRightButtonPress = (eventData: any) => {
+    // When placing, handle right-click regardless of what widget manager picked
+    if (model.widgetState.getPlacing()) {
+      removeLastHandle();
+      return macro.EVENT_ABORT;
+    }
+
     if (!model.activeState) {
       return macro.VOID;
     }
 
-    if (model.widgetState.getPlacing()) {
-      removeLastHandle();
-      return macro.EVENT_ABORT;
+    if (anotherWidgetHasFocus()) {
+      return macro.VOID;
     }
 
     const eventWithWidgetAction = {
@@ -430,7 +462,8 @@ export default function widgetBehavior(publicAPI: any, model: any) {
 
   // Called after we are finished/placed.
   publicAPI.loseFocus = () => {
-    if (model.hasFocus) {
+    const hadFocus = model.hasFocus;
+    if (hadFocus) {
       model._interactor.cancelAnimation(publicAPI);
       publicAPI.invokeEndInteractionEvent();
     }
@@ -440,6 +473,14 @@ export default function widgetBehavior(publicAPI: any, model: any) {
     model.widgetState.getMoveHandle().setOrigin(null);
     model.activeState = null;
     model.hasFocus = false;
+    if (hadFocus) {
+      model._widgetManager.releaseFocus();
+      // Deactivate all widgets so stale activeStates don't persist
+      // (user may right-click again without moving mouse)
+      model._widgetManager
+        .getWidgets()
+        .forEach((w: any) => w.deactivateAllHandles());
+    }
     model._widgetManager.enablePicking();
   };
 

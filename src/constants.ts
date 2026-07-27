@@ -22,6 +22,8 @@ export const ANNOTATION_TOOL_HANDLE_RADIUS = 6; // CSS pixels
 export const PICKABLE_ANNOTATION_TOOL_HANDLE_RADIUS =
   ANNOTATION_TOOL_HANDLE_RADIUS * 2;
 
+export const IMAGE_DRAG_MEDIA_TYPE = 'application/x-volview-image-id';
+
 export const ACTIONS = {
   windowLevel: {
     readable: 'Activate Window/Level tool',
@@ -38,8 +40,17 @@ export const ACTIONS = {
   paint: {
     readable: 'Activate Paint tool',
   },
-  brushSize: {
+  paintEraser: {
+    readable: 'Activate Paint tool with eraser',
+  },
+  brushSizeModifier: {
     readable: 'Change brush size by holding key and scrolling',
+  },
+  decreaseBrushSize: {
+    readable: 'Decrease brush size',
+  },
+  increaseBrushSize: {
+    readable: 'Increase brush size',
   },
   rectangle: {
     readable: 'Activate Rectangle tool',

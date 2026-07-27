@@ -10,7 +10,12 @@ import { onImageDeleted } from '@/src/composables/onImageDeleted';
 import { normalizeForStore, removeFromArray } from '@/src/utils';
 import { SegmentMask } from '@/src/types/segment';
 import { DEFAULT_SEGMENT_MASKS, CATEGORICAL_COLORS } from '@/src/config';
-import { readImage, writeImage } from '@/src/io/readWriteImage';
+import { readImage, writeSegmentation } from '@/src/io/readWriteImage';
+import {
+  parseSegNrrdMetadata,
+  overlaySegmentMetadata,
+} from '@/src/io/segNrrdMetadata';
+import type { ArtifactRestoreSource } from '@/src/io/import/processors/restoreStateFile';
 import {
   type DataSelection,
   getImage,
@@ -19,15 +24,19 @@ import {
 import vtkImageExtractComponents from '@/src/utils/imageExtractComponentsFilter';
 import { useImageCacheStore } from '@/src/store/image-cache';
 import DicomChunkImage from '@/src/core/streaming/dicomChunkImage';
+import { useDICOMStore } from '@/src/store/datasets-dicom';
 import vtkLabelMap from '../vtk/LabelMap';
 import {
   StateFile,
   Manifest,
   SegmentGroupMetadata,
+  SegmentGroup,
 } from '../io/state-file/schema';
+import { makeSegmentGroupArchivePath } from '../io/state-file/segmentGroupArchivePath';
 import { FileEntry } from '../io/types';
 import { ensureSameSpace } from '../io/resample/resample';
 import { untilLoaded } from '../composables/untilLoaded';
+import { useDatasetStore } from './datasets';
 
 const LabelmapArrayType = Uint8Array;
 export type LabelmapArrayType = Uint8Array;
@@ -38,14 +47,24 @@ export const makeDefaultSegmentGroupName = (baseName: string, index: number) =>
   `Segment Group ${index} for ${baseName}`;
 const numberer = (index: number) => (index <= 1 ? '' : `${index}`); // start numbering at 2
 
-export interface SegmentGroupMetadata {
+export type SegmentGroupMetadata = {
   name: string;
   parentImage: string;
   segments: {
     order: number[];
     byValue: Record<number, SegmentMask>;
   };
-}
+  // Provenance of a job-produced segment group. This is the durable
+  // idempotency key used to avoid reapplying a restored job output. Optional +
+  // additive — hand-painted groups have none. Flows through addLabelmap and
+  // round-trips the `.volview.zip` (see the matching `SegmentGroupSource` in
+  // io/state-file/schema.ts).
+  source?: {
+    providerId: string;
+    jobId: string;
+    outputId: string;
+  };
+};
 
 export function createLabelmapFromImage(imageData: vtkImageData) {
   const points = new LabelmapArrayType(imageData.getNumberOfPoints());
@@ -185,14 +204,8 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
   }
 
   // Used for constructing labelmap names in newLabelmapFromImage.
+  // Cleared by the onImageDeleted cascade below.
   const nextDefaultIndex: Record<string, number> = Object.create(null);
-
-  // clear nextDefaultIndex
-  onImageDeleted((deleted) => {
-    deleted.forEach((id) => {
-      delete nextDefaultIndex[id];
-    });
-  });
 
   function pickUniqueName(
     formatName: (index: number) => string,
@@ -258,12 +271,22 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
     return [...color, 255] as const;
   }
 
+  // `imageId` may be undefined when the labelmap's bytes did not arrive
+  // through a loaded image dataset (a zip-restored group). DICOM-SEG decoding
+  // still requires a source image, while file-header metadata can be supplied
+  // directly for archive-backed images.
   async function decodeSegments(
-    imageId: DataSelection,
+    imageId: DataSelection | undefined,
     image: vtkLabelMap,
-    component = 0
+    component = 0,
+    headerMetadata?: Map<string, string>
   ) {
-    if (!isRegularImage(imageId)) {
+    const dicomStore = useDICOMStore();
+    if (
+      imageId !== undefined &&
+      !isRegularImage(imageId) &&
+      dicomStore.volumeInfo[imageId]?.kind !== 'cine'
+    ) {
       await untilLoaded(imageId);
 
       const chunkImage = imageCacheStore.imageById[imageId] as DicomChunkImage;
@@ -278,13 +301,39 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
       }
     }
 
-    const [min, max] = image.getPointData().getScalars().getRange();
-    const noZeroBackground = Math.max(min, 1);
-    const values = Array.from(
-      { length: max - noZeroBackground + 1 },
-      (_, i) => i + noZeroBackground
-    );
-    return values.map((value) => ({
+    // Slicer-convention `.seg.nrrd` embedded metadata: a labelmap
+    // produced by a backend CLI carries its real segment names/colors in the
+    // NRRD header, captured onto the loaded image at import.
+    //
+    // MERGE, not replace: the distinct nonzero voxel values are the spine, so
+    // a labelled voxel with NO `Segment{N}_*` block still gets a default,
+    // visible, manageable segment instead of being dropped. Embedded
+    // name/color/visibility are overlaid onto the matching `LabelValue == voxel
+    // value`; undescribed values keep their default.
+    const embedded =
+      headerMetadata ??
+      (imageId !== undefined
+        ? imageCacheStore.imageById[imageId]?.headerMetadata
+        : undefined);
+    const described = embedded ? parseSegNrrdMetadata(embedded) : undefined;
+
+    // Distinct nonzero voxel values, ascending — the segment spine.
+    // Labelmap scalars are Uint8Array by construction (both callers pass a
+    // `toLabelMap` result, which forces UInt8), so a fixed 256-slot presence map
+    // gives one branch-free typed-array write per voxel on the hot path, and the
+    // 0..255 sweep is already ascending (no Set, no per-voxel Number(), no sort).
+    const voxelValues = image.getPointData().getScalars().getData();
+    const present = new Uint8Array(256);
+    for (let index = 0; index < voxelValues.length; index += 1) {
+      present[voxelValues[index]] = 1;
+    }
+    const values: number[] = [];
+    for (let value = 0; value < present.length; value += 1) {
+      if (present[value] && value !== LABELMAP_BACKGROUND_VALUE)
+        values.push(value);
+    }
+
+    return overlaySegmentMetadata(values, described, (value) => ({
       value,
       name: makeDefaultSegmentName(value),
       color: [...getNextColor()],
@@ -294,11 +343,18 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
 
   /**
    * Converts an image to a labelmap.
+   *
+   * Returns the created segment-group id(s) — one per component of the source
+   * image (one for the common single-component case). Awaits the per-component
+   * adds so the caller can act on the created groups synchronously afterwards
+   * (corroboration/present + descriptor application key off the
+   * returned ids rather than racing `orderByParent`).
    */
   async function convertImageToLabelmap(
     imageID: DataSelection,
-    parentID: DataSelection
-  ) {
+    parentID: DataSelection,
+    source?: SegmentGroupMetadata['source']
+  ): Promise<string[]> {
     if (imageID === parentID)
       throw new Error('Cannot convert an image to be a labelmap of itself');
 
@@ -332,28 +388,36 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
     const images =
       componentCount === 1 ? [childImage] : extractEachComponent(childImage);
 
-    images.forEach(async (image, component) => {
-      const matchingParentSpace = await ensureSameSpace(
-        parentImage,
-        image,
-        true
-      );
-      const labelmapImage = toLabelMap(matchingParentSpace);
+    return Promise.all(
+      images.map(async (image, component) => {
+        const matchingParentSpace = await ensureSameSpace(
+          parentImage,
+          image,
+          true
+        );
+        const labelmapImage = toLabelMap(matchingParentSpace);
 
-      const segments = await decodeSegments(imageID, labelmapImage, component);
-      const { order, byKey } = normalizeForStore(segments, 'value');
-      const segmentGroupStore = useSegmentGroupStore();
+        const segments = await decodeSegments(
+          imageID,
+          labelmapImage,
+          component
+        );
+        const { order, byKey } = normalizeForStore(segments, 'value');
+        const segmentGroupStore = useSegmentGroupStore();
 
-      const name = pickUniqueName(
-        (index: number) => `${baseName} ${numberer(index)}`,
-        parentID
-      );
-      segmentGroupStore.addLabelmap(labelmapImage, {
-        name,
-        parentImage: parentID,
-        segments: { order, byValue: byKey },
-      });
-    });
+        const name = pickUniqueName(
+          (index: number) => `${baseName} ${numberer(index)}`,
+          parentID
+        );
+        const id = segmentGroupStore.addLabelmap(labelmapImage, {
+          name,
+          parentImage: parentID,
+          segments: { order, byValue: byKey },
+          ...(source ? { source } : {}),
+        });
+        return id;
+      })
+    );
   }
 
   /**
@@ -409,6 +473,7 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
       throw new Error('Invalid segment');
     metadata.segments.byValue[seg.value] = seg;
     metadata.segments.order.push(seg.value);
+    return seg;
   }
 
   /**
@@ -427,7 +492,7 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
     const metadata = getMetadata(segmentGroupID);
     const segment = getSegment(segmentGroupID, segmentValue);
     metadata.segments.byValue[segmentValue] = {
-      ...segment,
+      ...toRaw(segment),
       ...segmentUpdate,
     };
   }
@@ -455,6 +520,7 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
    */
   async function serialize(state: StateFile) {
     const { zip } = state;
+    const usedArchivePaths = new Set<string>();
 
     // orderByParent is implicitly preserved based on
     // the order of serialized entries.
@@ -466,7 +532,11 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
         const metadata = metadataByID[id];
         return {
           id,
-          path: `labels/${id}.${saveFormat.value}`,
+          path: makeSegmentGroupArchivePath(
+            metadata.name,
+            saveFormat.value,
+            usedArchivePaths
+          ),
           metadata: {
             ...metadata,
             parentImage: metadata.parentImage,
@@ -475,13 +545,16 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
       });
     });
 
-    state.manifest.labelMaps = serialized;
+    state.manifest.segmentGroups = serialized;
 
     // save labelmap images
     await Promise.all(
       serialized.map(async ({ id, path }) => {
-        const vtkImage = dataIndex[id];
-        const serializedImage = await writeImage(saveFormat.value, vtkImage);
+        const serializedImage = await writeSegmentation(
+          saveFormat.value,
+          dataIndex[id],
+          metadataByID[id]
+        );
         zip.file(path, serializedImage);
       })
     );
@@ -494,45 +567,184 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
     this: _This,
     manifest: Manifest,
     stateFiles: FileEntry[],
-    dataIDMap: Record<string, string>
+    dataIDMap: Record<string, string>,
+    // Per-group artifact source, resolved by the restore setup (see
+    // resolveArtifactRestoreSources in restoreStateFile.ts, the single owner
+    // of the synthesized-leaf and ownership policy). Mapped through dataIDMap
+    // here.
+    artifactSources: Record<string, ArtifactRestoreSource> = {}
   ) {
-    const { labelMaps } = manifest;
+    const { segmentGroups } = manifest;
+    const datasetStore = useDatasetStore();
 
     const segmentGroupIDMap: Record<string, string> = {};
+    // Non-silent drops: every group left out of the restore is recorded here
+    // with a concrete reason so the caller can surface it.
+    const skipped: Array<{ name: string; reason: string }> = [];
+
+    if (!segmentGroups || segmentGroups.length === 0) {
+      return { segmentGroupIDMap, skipped };
+    }
 
     // First restore the data, then restore the store.
     // This preserves ordering from orderByParent.
 
-    const newLabelmapIDs = await Promise.all(
-      labelMaps.map(async (labelMap) => {
-        const [file] = stateFiles
-          .filter((entry) => entry.archivePath === normalize(labelMap.path))
-          .map((entry) => entry.file);
+    // `path` is authoritative for bytes when present: a re-saved
+    // zip carries the archive bytes AND the provenance `dataSourceId`, but
+    // `dataIDMap` is keyed by save-time DATASET ids. Consulting it for a
+    // path-carrying group could hang restore on a missing key, or worse,
+    // build the group from an unrelated dataset's voxels and then delete that
+    // dataset. The `dataSourceId` branch remains for composed manifests,
+    // whose groups carry no archive bytes — see `artifactStoreId` for how the
+    // artifact's store id is resolved.
+    // The temporary artifact dataset id (if any) is resolved by the CALLER
+    // before the restore `try`, so its cleanup can run unconditionally in a
+    // `finally` even when this load throws. This function yields the image and
+    // any file-header metadata needed to reconstruct segment descriptors.
+    async function loadSegmentGroupImage(
+      segmentGroup: SegmentGroup,
+      storeId: string | undefined
+    ) {
+      if (segmentGroup.path !== undefined) {
+        const file = stateFiles.find(
+          (entry) => entry.archivePath === normalize(segmentGroup.path!)
+        )?.file;
+        return readImage(file!);
+      }
 
-        const vtkImage = await readImage(file);
-        const labelmapImage = toLabelMap(vtkImage);
+      await untilLoaded(storeId!);
+      const image = imageCacheStore.getVtkImageData(storeId!);
+      if (!image) {
+        throw new Error(
+          `Could not get image data for dataSourceId ${segmentGroup.dataSourceId}`
+        );
+      }
+      return {
+        image,
+        headerMetadata: imageCacheStore.imageById[storeId!]?.headerMetadata,
+      };
+    }
 
-        const id = useIdStore().nextId();
-        dataIndex[id] = labelmapImage;
-        return id;
-      })
+    // A path-less group's artifact store id: the restore setup already
+    // resolved which STATE id carries each group's artifact (synthesized leaf
+    // or covering dataset — a policy owned entirely by restoreStateFile.ts);
+    // this only maps that id through dataIDMap.
+    const artifactStoreId = (segmentGroup: SegmentGroup) => {
+      if (segmentGroup.path !== undefined) return undefined;
+      const source = artifactSources[segmentGroup.id];
+      return source !== undefined ? dataIDMap[source.stateId] : undefined;
+    };
+
+    // Resilient restore. Skip BEFORE awaiting anything a
+    // group whose base image is unresolved, or a path-less group whose artifact
+    // datasource never materialized — `untilLoaded(undefined)` never times out
+    // and would hang restore forever. A missing key is knowable up front, so
+    // the pre-await guard catches it; the per-group settle below is the safety
+    // net for a fetch/parse failure. Skipped groups drop out of the id map so
+    // they are left out of the restore.
+    const attachable = segmentGroups.filter((segmentGroup) => {
+      if (dataIDMap[segmentGroup.metadata.parentImage] === undefined) {
+        skipped.push({
+          name: segmentGroup.metadata.name,
+          reason: 'parent image did not load',
+        });
+        return false;
+      }
+      if (segmentGroup.path !== undefined) return true;
+      const hasArtifact = artifactStoreId(segmentGroup) !== undefined;
+      if (!hasArtifact) {
+        skipped.push({
+          name: segmentGroup.metadata.name,
+          reason: 'artifact source unavailable',
+        });
+      }
+      return hasArtifact;
+    });
+
+    // Every path-less group's temporary imported artifact must be removed
+    // exactly ONCE, and only AFTER every group that reads it has settled.
+    // prepareLeafDataSources dedupes leaves by dataSourceId, so two path-less
+    // groups referencing the same artifact share ONE temp dataset id; removing
+    // it inside each group's `finally` let the first group's cleanup starve the
+    // second group's `getVtkImageData`, dropping it as unreadable. Collect the
+    // unique ids here and remove them after the `Promise.all` — in a `finally`
+    // so the cleanup runs even if a group throws unexpectedly. Archive-backed
+    // groups (path !== undefined) own no temp dataset.
+    // Collected from EVERY group, not just the attachable ones: a group
+    // skipped at the parent-image check may still have imported its artifact
+    // leaf, and that orphan would otherwise sit in the dataset store and
+    // re-serialize into every future save.
+    const tempStoreIdsToRemove = new Set(
+      segmentGroups
+        .filter(
+          (segmentGroup) => artifactSources[segmentGroup.id]?.temporary === true
+        )
+        .map(artifactStoreId)
+        .filter((storeId): storeId is string => storeId !== undefined)
     );
 
-    labelMaps.forEach((labelMap, index) => {
-      const { metadata } = labelMap;
-      // map parent id to new id
-      const parentImage = dataIDMap[metadata.parentImage];
-      metadata.parentImage = parentImage;
+    let labelmapResults;
+    try {
+      labelmapResults = await Promise.all(
+        attachable.map(async (segmentGroup) => {
+          const storeId = artifactStoreId(segmentGroup);
+          try {
+            const { image, headerMetadata } = await loadSegmentGroupImage(
+              segmentGroup,
+              storeId
+            );
+            const labelmapImage = toLabelMap(image);
 
-      const newID = newLabelmapIDs[index];
-      segmentGroupIDMap[labelMap.id] = newID;
+            // Descriptor-less group: `segments` is optional on the wire. When absent,
+            // build the catalog through the SAME decode/enumerate/default path
+            // live convertImageToLabelmap uses (voxel enumeration + embedded
+            // .seg.nrrd metadata overlay + default names/colors) — parity is
+            // pinned by segmentGroupDescriptorlessParity.spec.ts.
+            const segments =
+              segmentGroup.metadata.segments ??
+              (await (async () => {
+                const decoded = await decodeSegments(
+                  storeId,
+                  labelmapImage,
+                  0,
+                  headerMetadata
+                );
+                const { order, byKey } = normalizeForStore(decoded, 'value');
+                return { order, byValue: byKey };
+              })());
 
-      metadataByID[newID] = metadata;
+            const id = useIdStore().nextId();
+            dataIndex[id] = labelmapImage;
+            return { segmentGroup, id, segments };
+          } catch {
+            // A parse/read failure skips just this group — never rejects the
+            // whole restore; the survivors still attach. Recorded (not silent) so
+            // the caller can report it.
+            skipped.push({
+              name: segmentGroup.metadata.name,
+              reason: 'could not read/parse labelmap',
+            });
+            return undefined;
+          }
+        })
+      );
+    } finally {
+      tempStoreIdsToRemove.forEach((storeId) => datasetStore.remove(storeId));
+    }
+
+    labelmapResults.forEach((result) => {
+      if (!result) return;
+      const { segmentGroup, id: newID, segments } = result;
+      segmentGroupIDMap[segmentGroup.id] = newID;
+
+      const parentImage = dataIDMap[segmentGroup.metadata.parentImage];
+      metadataByID[newID] = { ...segmentGroup.metadata, parentImage, segments };
+
       orderByParent.value[parentImage] ??= [];
       orderByParent.value[parentImage].push(newID);
     });
 
-    return segmentGroupIDMap;
+    return { segmentGroupIDMap, skipped };
   }
 
   // --- sync segments --- //
@@ -565,9 +777,12 @@ export const useSegmentGroupStore = defineStore('segmentGroup', () => {
 
   onImageDeleted((deleted) => {
     deleted.forEach((parentID) => {
-      orderByParent.value[parentID]?.forEach((segmentGroupID) => {
-        removeGroup(segmentGroupID);
-      });
+      delete nextDefaultIndex[parentID];
+      // Iterate a COPY: removeGroup splices the same orderByParent array via
+      // removeFromArray, so forEaching the live array skips every other group
+      // when an image has 2+ groups (the normal case once job labelmaps and
+      // multi-component conversions land).
+      [...(orderByParent.value[parentID] ?? [])].forEach(removeGroup);
     });
   });
 
