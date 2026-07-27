@@ -72,6 +72,8 @@ export class Chunk {
     this.machine.unsubscribe(this.onStateUpdated);
     this.events.all.clear();
     this.userData.clear();
+    this.dataLoader.stop();
+    this.dataLoader.data = undefined;
   }
 
   get state() {

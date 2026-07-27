@@ -54,40 +54,46 @@ async function computeAutoRangeValues(imageData: vtkImageData) {
     return {};
   }
 
-  const worker = Comlink.wrap<HistogramWorker>(
-    new Worker(new URL('@/src/utils/histogram.worker.ts', import.meta.url), {
+  const rawWorker = new Worker(
+    new URL('@/src/utils/histogram.worker.ts', import.meta.url),
+    {
       type: 'module',
-    })
+    }
   );
+  const worker = Comlink.wrap<HistogramWorker>(rawWorker);
 
-  const { min, max } = getAllComponentRange(scalars);
-  const scalarData = scalars.getData() as number[];
-  const hist = await worker.histogram(scalarData, [min, max], WL_HIST_BINS);
-  worker[Comlink.releaseProxy]();
+  try {
+    const { min, max } = getAllComponentRange(scalars);
+    const scalarData = scalars.getData() as number[];
+    const hist = await worker.histogram(scalarData, [min, max], WL_HIST_BINS);
 
-  const cumulativeHist: number[] = [];
-  hist.reduce((acc, val) => {
-    const currentSum = acc + val;
-    cumulativeHist.push(currentSum);
-    return currentSum;
-  }, 0);
+    const cumulativeHist: number[] = [];
+    hist.reduce((acc, val) => {
+      const currentSum = acc + val;
+      cumulativeHist.push(currentSum);
+      return currentSum;
+    }, 0);
 
-  const width = (max - min + 1) / WL_HIST_BINS;
-  const totalCount = scalarData.length;
+    const width = (max - min + 1) / WL_HIST_BINS;
+    const totalCount = scalarData.length;
 
-  return Object.fromEntries(
-    Object.entries(WLAutoRanges).map(([key, percentage]) => {
-      const lowerBound = percentage * 0.01 * totalCount;
-      const upperBound = (1 - percentage * 0.01) * totalCount;
+    return Object.fromEntries(
+      Object.entries(WLAutoRanges).map(([key, percentage]) => {
+        const lowerBound = percentage * 0.01 * totalCount;
+        const upperBound = (1 - percentage * 0.01) * totalCount;
 
-      const startIdx = cumulativeHist.findIndex((v) => v >= lowerBound);
-      const endIdx = cumulativeHist.findIndex((v) => v >= upperBound);
+        const startIdx = cumulativeHist.findIndex((v) => v >= lowerBound);
+        const endIdx = cumulativeHist.findIndex((v) => v >= upperBound);
 
-      const start = Math.max(min, min + width * startIdx);
-      const end = Math.min(max, min + width * (endIdx + 1)); // Adjusted end calculation
-      return [key, [start, end] as [number, number]];
-    })
-  );
+        const start = Math.max(min, min + width * startIdx);
+        const end = Math.min(max, min + width * (endIdx + 1));
+        return [key, [start, end] as [number, number]];
+      })
+    );
+  } finally {
+    worker[Comlink.releaseProxy]();
+    rawWorker.terminate();
+  }
 }
 
 export const useImageStatsStore = defineStore('image-stats', () => {
