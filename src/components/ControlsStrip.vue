@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
-import { ref, computed, watch } from 'vue';
+import { ref, computed } from 'vue';
 import { loadUserPromptedFiles } from '@/src/actions/loadUserFiles';
 import useRemoteSaveStateStore from '@/src/store/remote-save-state';
 import CloseableDialog from '@/src/components/CloseableDialog.vue';
@@ -12,42 +12,13 @@ import ControlsStripTools from '@/src/components/ControlsStripTools.vue';
 import MessageCenter from '@/src/components/MessageCenter.vue';
 import { MessageType, useMessageStore } from '@/src/store/messages';
 import { ConnectionState, useServerStore } from '@/src/store/server';
-import { useViewStore } from '@/src/store/views';
-import { Layouts, DefaultLayoutName } from '@/src/config';
+import LayoutSelector from '@/src/components/LayoutSelector.vue';
 
 interface Props {
   hasData: boolean;
 }
 
 defineProps<Props>();
-
-function useViewLayout() {
-  const viewStore = useViewStore();
-  const layoutName = ref(DefaultLayoutName);
-  const { layout: currentLayout } = storeToRefs(viewStore);
-
-  watch(
-    layoutName,
-    () => {
-      const layout = Layouts[layoutName.value] || [];
-      viewStore.setLayout(layout);
-    },
-    {
-      immediate: true,
-    }
-  );
-
-  watch(currentLayout, () => {
-    if (
-      currentLayout.value?.name &&
-      currentLayout.value.name !== layoutName.value
-    ) {
-      layoutName.value = currentLayout.value.name;
-    }
-  });
-
-  return layoutName;
-}
 
 function useSaveControls() {
   const remoteSaveStateStore = useRemoteSaveStateStore();
@@ -114,7 +85,6 @@ function useServerConnection() {
 const settingsDialog = ref(false);
 const messageDialog = ref(false);
 const { icon: connIcon, url: serverUrl } = useServerConnection();
-const layoutName = useViewLayout();
 const { handleSave, saveDialog, isSaving } = useSaveControls();
 const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
 </script>
@@ -140,7 +110,7 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
       @click="handleSave"
     />
     <div v-if="false" class="my-1 tool-separator" />
-    <v-menu location="right" :close-on-content-click="true">
+    <v-menu location="left" :close-on-content-click="true">
       <template v-slot:activator="{ props }">
         <div class="mt-15">
           <control-button
@@ -153,14 +123,7 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
       </template>
       <v-card>
         <v-card-text>
-          <v-radio-group v-model="layoutName" class="mt-0" hide-details>
-            <v-radio
-              v-for="(value, key) in Layouts"
-              :key="key"
-              :label="value.name"
-              :value="key"
-            />
-          </v-radio-group>
+          <LayoutSelector />
         </v-card-text>
       </v-card>
     </v-menu>
