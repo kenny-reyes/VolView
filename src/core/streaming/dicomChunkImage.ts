@@ -147,6 +147,7 @@ export default class DicomChunkImage
     super.dispose();
     this.unregisterChunkListeners();
     this.events.all.clear();
+    this.chunks.forEach((chunk) => chunk.dispose());
     this.chunks.length = 0;
     this.vtkImageData.value.delete();
     this.chunkStatus = [];
