@@ -8,7 +8,8 @@ import { Chunk, waitForChunkState } from '@/src/core/streaming/chunk';
 import { Image, JsonCompatible, readImage } from '@itk-wasm/image-io';
 import { getWorker } from '@/src/io/itk/worker';
 import { allocateImageFromChunks } from '@/src/utils/allocateImageFromChunks';
-import { TypedArray } from '@kitware/vtk.js/types';
+import { TypedArray, Vector3 } from '@kitware/vtk.js/types';
+import type { mat3 } from 'gl-matrix';
 import { Tags } from '@/src/core/dicomTags';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 import { ChunkState } from '@/src/core/streaming/chunkStateMachine';
@@ -404,13 +405,39 @@ export default class DicomChunkImage
       );
     }
 
+    const isSingleMultiframeChunk =
+      result.image.size[2] > 1 && this.chunks.length === 1;
+    if (isSingleMultiframeChunk) {
+      const image = vtkITKHelper.convertItkToVtkImage(result.image);
+      const spacing = [...image.getSpacing()];
+      const direction = [...image.getDirection()];
+      // GDCM may report a negative spacing (e.g. SpacingBetweenSlices < 0).
+      // VTK expects positive spacings, so fold the sign into the direction
+      // matrix, which preserves the physical location of every slice.
+      for (let axis = 0; axis < 3; axis++) {
+        if (spacing[axis] < 0) {
+          spacing[axis] = -spacing[axis];
+          direction[axis * 3] = -direction[axis * 3];
+          direction[axis * 3 + 1] = -direction[axis * 3 + 1];
+          direction[axis * 3 + 2] = -direction[axis * 3 + 2];
+        }
+      }
+      image.setSpacing(spacing as Vector3);
+      image.setDirection(direction as mat3);
+      // Do not delete() the previous image here: active views may still be
+      // rendering it. It is reclaimed once views react to the ref swap.
+      this.vtkImageData.value = image;
+    }
+
     const scalars = this.vtkImageData.value.getPointData().getScalars();
     const pixelData = scalars.getData() as TypedArray;
 
     const dims = this.vtkImageData.value.getDimensions();
-    const offset =
-      dims[0] * dims[1] * scalars.getNumberOfComponents() * chunkIndex;
-    pixelData.set(result.image.data as TypedArray, offset);
+    if (!isSingleMultiframeChunk) {
+      const offset =
+        dims[0] * dims[1] * scalars.getNumberOfComponents() * chunkIndex;
+      pixelData.set(result.image.data as TypedArray, offset);
+    }
 
     const rangeAlreadyInitialized = this.chunkStatus.some(
       (status) => status === ChunkStatus.Loaded
@@ -439,7 +466,14 @@ export default class DicomChunkImage
     this.chunkStatus[chunkIndex] = ChunkStatus.Loaded;
     this.events.emit('chunkLoad', {
       chunk,
-      updatedExtent: [0, dims[0] - 1, 0, dims[1] - 1, chunkIndex, chunkIndex],
+      updatedExtent: [
+        0,
+        dims[0] - 1,
+        0,
+        dims[1] - 1,
+        isSingleMultiframeChunk ? 0 : chunkIndex,
+        isSingleMultiframeChunk ? dims[2] - 1 : chunkIndex,
+      ],
     });
     this.onChunksUpdated();
 

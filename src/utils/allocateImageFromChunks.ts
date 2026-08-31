@@ -146,7 +146,10 @@ export function allocateImageFromChunks(sortedChunks: Chunk[]) {
       vec3.sub(zVec, lastIPP as vec3, imagePositionPatient as vec3);
       spacing[2] = vec3.len(zVec) / (slices - 1) || 1;
     }
-  } else if (slices === 1 && isPositiveFiniteNumber(spacingBetweenSlices)) {
+  } else if (
+    sortedChunks.length === 1 &&
+    isPositiveFiniteNumber(spacingBetweenSlices)
+  ) {
     spacing[2] = spacingBetweenSlices;
   }
   image.setSpacing(spacing);
