@@ -92,7 +92,7 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
 <template>
   <div
     id="tools-strip"
-    class="bg-grey-darken-4 d-flex flex-column align-center"
+    class="bg-grey-darken-4 d-flex flex-column align-center pt-2"
   >
     <control-button
       v-if="false"
@@ -112,14 +112,12 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
     <div v-if="false" class="my-1 tool-separator" />
     <v-menu location="left" :close-on-content-click="true">
       <template v-slot:activator="{ props }">
-        <div class="mt-15">
-          <control-button
-            v-bind="props"
-            size="40"
-            icon="mdi-view-dashboard"
-            name="Layouts"
-          />
-        </div>
+        <control-button
+          v-bind="props"
+          size="40"
+          icon="mdi-view-dashboard"
+          name="Layouts"
+        />
       </template>
       <v-card>
         <v-card-text>
@@ -158,6 +156,7 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
       name="Settings"
       @click="settingsDialog = true"
     />
+    <slot name="footer" />
   </div>
   <closeable-dialog v-model="saveDialog" max-width="30%">
     <template v-slot="{ close }">
