@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, watch, computed, toRefs } from 'vue';
+import { inject, watch, computed, toRefs, onScopeDispose } from 'vue';
 import type { ReadonlyVec3 } from 'gl-matrix';
 import { vec3 } from 'gl-matrix';
 import { onVTKEvent } from '@/src/composables/onVTKEvent';
@@ -8,20 +8,30 @@ import { VtkViewContext } from '@/src/components/vtk/context';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import vtkPointPicker from '@kitware/vtk.js/Rendering/Core/PointPicker';
 import { useSliceRepresentation } from '@/src/core/vtk/useSliceRepresentation';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { useSegmentationStore } from '@/src/segmentation/store';
+import { useSegmentStore } from '@/src/segmentation/segments';
 import { useProbeStore } from '@/src/store/probe';
 import { useImageCacheStore } from '@/src/store/image-cache';
 import { NO_NAME } from '@/src/constants';
+import { plural } from '@/src/utils';
 
 type SliceRepresentationType = ReturnType<typeof useSliceRepresentation>;
 
 const props = defineProps<{
   baseRep: SliceRepresentationType;
   layerReps: SliceRepresentationType[];
-  segmentGroupsReps: SliceRepresentationType[];
+  createPicker?: () => Pick<
+    ReturnType<typeof vtkPointPicker.newInstance>,
+    | 'setPickFromList'
+    | 'setPickList'
+    | 'pick'
+    | 'getActors'
+    | 'getPointIJK'
+    | 'delete'
+  >;
 }>();
 
-const { baseRep, layerReps, segmentGroupsReps } = toRefs(props);
+const { baseRep, layerReps } = toRefs(props);
 const view = inject(VtkViewContext);
 if (!view) throw new Error('No VtkView');
 
@@ -32,7 +42,8 @@ const {
   currentLayers,
 } = useCurrentImage();
 const imageCacheStore = useImageCacheStore();
-const segmentGroupStore = useSegmentGroupStore();
+const segmentationStore = useSegmentationStore();
+const { segments } = useSegmentStore();
 const probeStore = useProbeStore();
 
 // Helper functions to build a unified sample set
@@ -65,35 +76,15 @@ const getLayers = () =>
     })
     .filter(Boolean);
 
-const getSegments = () => {
-  if (!currentImageID.value) return [];
-  const parentGroups = segmentGroupStore.orderByParent[currentImageID.value];
-  if (!parentGroups) return [];
-  return segmentGroupsReps.value
-    .map((rep, index) => {
-      const groupId = parentGroups[index];
-      if (!groupId) return null;
-      const meta = segmentGroupStore.metadataByID[groupId];
-      return {
-        type: 'segmentGroup',
-        id: groupId,
-        name: meta.name,
-        rep,
-        segments: meta.segments,
-        image: segmentGroupStore.dataIndex[groupId],
-      };
-    })
-    .filter(Boolean);
-};
-
 const sampleSet = computed(() => {
   const base = getBaseSlice();
   if (!base) return [];
-  return [...getSegments(), ...getLayers(), base];
+  return [...getLayers(), base];
 });
 
-const pointPicker = vtkPointPicker.newInstance();
+const pointPicker = (props.createPicker ?? vtkPointPicker.newInstance)();
 pointPicker.setPickFromList(true);
+onScopeDispose(() => pointPicker.delete());
 
 watch(
   () => baseRep.value?.actor,
@@ -115,7 +106,7 @@ const getImageSamples = (x: number, y: number) => {
     currentImageData.value.indexToWorld(pickedIjk) as vec3
   );
 
-  const samples = sampleSet.value
+  const sampled = sampleSet.value
     .map((item: any) => {
       // Convert world position to this specific image's IJK
       const itemIjk = worldPointToIndex(item.image, worldPosition);
@@ -140,20 +131,33 @@ const getImageSamples = (x: number, y: number) => {
       }
 
       const index = dims[0] * dims[1] * k + dims[0] * j + i;
-      const scalars = scalarData.getTuple(index) as number[];
-      const baseInfo = { id: item.id, name: item.name };
-
-      if (item.type === 'segmentGroup') {
-        return {
-          ...baseInfo,
-          displayValues: scalars.map(
-            (v) => item.segments.byValue[v]?.name || 'Background'
-          ),
-        };
-      }
-      return { ...baseInfo, displayValues: scalars };
+      return { item, scalars: scalarData.getTuple(index) as number[] };
     })
     .filter((s): s is NonNullable<typeof s> => s !== null);
+
+  // Masks sit on the base image's grid, so its picked index addresses them.
+  const imageId = currentImageID.value;
+  const [pi, pj, pk] = [...pickedIjk].map(Math.round);
+  const covering = (
+    imageId ? segmentationStore.segmentsAt(imageId, pi, pj, pk) : []
+  ).map((segmentId) => segments.appearanceOf(segmentId).displayName);
+  const segmentSamples = covering.length
+    ? [
+        {
+          id: 'segments',
+          name: plural(covering.length, 'Segment'),
+          displayValues: covering,
+        },
+      ]
+    : [];
+  const samples = [
+    ...segmentSamples,
+    ...sampled.map(({ item, scalars }) => ({
+      id: item.id,
+      name: item.name,
+      displayValues: scalars,
+    })),
+  ];
 
   return {
     pos: worldPosition,

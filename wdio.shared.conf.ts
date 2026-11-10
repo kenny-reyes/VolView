@@ -5,33 +5,8 @@ import type { Options, Capabilities } from '@wdio/types';
 import { SevereServiceError } from 'webdriverio';
 import { projectRoot } from './tests/e2eTestUtils';
 import { AUX_PORT, BASE_URL, TEST_PORT } from './tests/e2ePorts';
-
-const TEST_DATASETS = [
-  {
-    url: 'https://data.kitware.com/api/v1/file/6566aa81c5a2b36857ad1783/download',
-    name: 'CT000085.dcm',
-  },
-  {
-    url: 'https://data.kitware.com/api/v1/file/68e9807dbf0f869935e36481/download',
-    name: 'minimal.dcm',
-  },
-  {
-    url: 'https://data.kitware.com/api/v1/item/63527c7311dab8142820a338/download',
-    name: 'prostate.zip',
-  },
-  {
-    url: 'https://data.kitware.com/api/v1/item/6352a2b311dab8142820a33b/download',
-    name: 'MRA-Head_and_Neck.zip',
-  },
-  {
-    url: 'https://data.kitware.com/api/v1/item/635679c311dab8142820a4f4/download',
-    name: 'fetus.zip',
-  },
-  {
-    url: 'https://sourceforge.net/p/gdcm/gdcmdata/ci/master/tree/US-MONO2-8-8x-execho.dcm?format=raw',
-    name: 'US-MONO2-8-8x-echo.dcm',
-  },
-];
+import { TEST_DATASETS } from './tests/datasets';
+import { DATASET_CACHE, downloadDatasets } from './tests/downloadDatasets';
 
 // Fixed capture viewport (Playwright's default).
 export const CONTENT_VIEWPORT = { width: 1280, height: 720 } as const;
@@ -41,22 +16,36 @@ export const CONTENT_VIEWPORT = { width: 1280, height: 720 } as const;
 export const applyTestViewport = (browser: any) =>
   browser.setViewport({ ...CONTENT_VIEWPORT, devicePixelRatio: 1 });
 
-// for slow connections try:
-// DOWNLOAD_TIMEOUT=60000 && npm run test:e2e:dev
+// How long data may take to load and render. Nothing here crosses the network.
 export const DOWNLOAD_TIMEOUT = Number(process.env.DOWNLOAD_TIMEOUT ?? 30000);
 
 const IS_CI = !!(process.env.CI || process.env.GITHUB_ACTIONS);
 
 const ROOT = projectRoot();
 const TMP = '.tmp/';
-// Fixtures are downloaded once and shared by every run.
-export const DATASET_CACHE = path.resolve(ROOT, TMP, 'datasets');
 // Everything a run generates or downloads through the browser, including the
 // fixture links it serves. Also the browser downloads directory. Keyed by port
 // so a checkout, or an overridden port, gets scratch space of its own.
 export const TEMP_DIR = path.resolve(ROOT, TMP, 'runs', String(TEST_PORT));
 const FIXTURES_DIR = 'tests/fixtures/';
 export const FIXTURES = path.resolve(ROOT, FIXTURES_DIR);
+
+let failureScreenshotCount = 0;
+
+export async function captureFailureScreenshot(title: string) {
+  try {
+    const name = title.replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 150);
+    failureScreenshotCount += 1;
+    await browser.saveScreenshot(
+      path.join(
+        TEMP_DIR,
+        `failure-${process.pid}-${failureScreenshotCount}-${name}.png`
+      )
+    );
+  } catch (error) {
+    console.warn('Could not capture the failure screenshot:', error);
+  }
+}
 
 // The static server and the browser's download directory both point into
 // TEMP_DIR, and Windows refuses to unlink a file while a handle is open, so give
@@ -73,7 +62,7 @@ const removeDir = (dir: string) =>
  * Exposes a cached fixture under this run's directory, so specs can reach it at
  * `/tmp/<name>` without every run holding its own copy.
  */
-export function linkCachedDataset(name: string) {
+function linkCachedDataset(name: string) {
   const runPath = path.join(TEMP_DIR, name);
   if (fs.existsSync(runPath)) return runPath;
 
@@ -171,16 +160,28 @@ export const config: Options.Testrunner = {
         // Pinned geometry, so no {platformName}/{width}x{height}; one shared baseline.
         formatImageName: '{tag}-{browserName}-{dpr}',
         screenshotPath: TEMP_DIR,
-        autoSaveBaseline: true,
+        // A missing baseline is written and passes, which suits a local run
+        // adding a screenshot. On CI it would turn a renamed tag into a test
+        // that compares nothing.
+        autoSaveBaseline: !IS_CI,
       },
     ],
     'cleanuptotal',
   ],
   framework: 'mocha',
-  reporters: ['spec', 'html-nice'],
+  reporters: [
+    'spec',
+    [
+      'html-nice',
+      {
+        outputDir: `${path.relative(ROOT, path.join(TEMP_DIR, 'reports'))}${path.sep}`,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: 'bdd',
     timeout: 90_000,
+    require: ['./tests/rootHooks.ts'],
   },
 
   //
@@ -192,52 +193,15 @@ export const config: Options.Testrunner = {
     // directory of whichever suite is already holding the port.
     await assertPortsAvailable();
 
-    fs.mkdirSync(DATASET_CACHE, { recursive: true });
     // Start empty, so whatever is in here afterwards came from this run.
     removeDir(TEMP_DIR);
     fs.mkdirSync(TEMP_DIR, { recursive: true });
 
-    const RETRIES = 3;
-    const RETRY_DELAY_MS = 500;
-    const delay = (ms: number) =>
-      new Promise((resolve) => {
-        setTimeout(resolve, ms);
-      });
-    const downloadOnce = async (url: string, savePath: string) => {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} for ${url}`);
-      }
-      const data = await response.arrayBuffer();
-      // Write to a temp path first so a failed/partial download never leaves a
-      // corrupt file that the existsSync check would treat as already cached.
-      const tmpPath = `${savePath}.part`;
-      fs.writeFileSync(tmpPath, Buffer.from(data));
-      fs.renameSync(tmpPath, savePath);
-    };
-
-    const downloads = TEST_DATASETS.map(async ({ url, name }) => {
-      const savePath = path.join(DATASET_CACHE, name);
-      if (!fs.existsSync(savePath)) {
-        for (let attempt = 1; attempt <= RETRIES; attempt += 1) {
-          try {
-            await downloadOnce(url, savePath);
-            break;
-          } catch (err) {
-            if (attempt === RETRIES) {
-              throw new Error(
-                `Failed to download ${name} after ${RETRIES} attempts: ${
-                  (err as Error).message
-                }`
-              );
-            }
-            await delay(RETRY_DELAY_MS);
-          }
-        }
-      }
-      linkCachedDataset(name);
+    // Severe, so a failed download aborts the run and is never a spec failure.
+    await downloadDatasets().catch((err: Error) => {
+      throw new SevereServiceError(err.message);
     });
-    await Promise.all(downloads);
+    TEST_DATASETS.forEach(({ name }) => linkCachedDataset(name));
   },
 
   async onComplete(exitCode, completedConfig) {
@@ -259,14 +223,20 @@ export const config: Options.Testrunner = {
     browser: any
   ) {
     await applyTestViewport(browser);
+  },
 
-    // Subscribe to browser console logs and output them directly
-    await browser.sessionSubscribe({ events: ['log.entryAdded'] });
+  async afterTest(test, _context, { error }) {
+    if (error) {
+      await captureFailureScreenshot(`test-${test.parent}-${test.title}`);
+    }
+  },
 
-    browser.on('log.entryAdded', (logEntry: any) => {
-      const message = logEntry.text || '';
-      console.log(`[Browser Console] [${logEntry.level}] ${message}`);
-    });
+  async afterHook(hook, _context, { error }, hookName) {
+    if (error) {
+      await captureFailureScreenshot(
+        `hook-${hookName}-${hook.parent}-${hook.title}`
+      );
+    }
   },
 
   async afterCommand(commandName: string) {

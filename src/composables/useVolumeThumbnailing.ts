@@ -2,8 +2,7 @@ import { onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { Mode as LookupTableProxyMode } from '@kitware/vtk.js/Proxy/Core/LookupTableProxy';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import vtkPiecewiseFunctionProxy from '@kitware/vtk.js/Proxy/Core/PiecewiseFunctionProxy';
-import vtkColorMaps from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction/ColorMaps';
-import type { Vector3 } from '@kitware/vtk.js/types';
+import { getPresetByName } from '@/src/types/color-map-preset';
 import { createVolumeThumbnailer } from '../core/thumbnailers/volume-thumbnailer';
 import { useCameraOrientation } from './useCameraOrientation';
 import { useImageStore } from '../store/datasets-images';
@@ -13,6 +12,7 @@ import {
   getOpacityRangeFromPreset,
 } from '../utils/vtk-helpers';
 import { PresetNameList } from '../vtk/ColorMaps';
+import { logError } from '../utils/loggers';
 
 function resetOpacityFunction(
   pwfProxy: vtkPiecewiseFunctionProxy,
@@ -22,9 +22,9 @@ function resetOpacityFunction(
   // reset pwf proxy range
   pwfProxy.setDataRange(...dataRange);
 
-  const preset = vtkColorMaps.getPresetByName(presetName);
-  if (preset.OpacityPoints) {
-    const OpacityPoints = preset.OpacityPoints as number[];
+  const preset = getPresetByName(presetName);
+  if (preset?.OpacityPoints) {
+    const OpacityPoints = preset.OpacityPoints;
     const points = [];
     for (let i = 0; i < OpacityPoints.length; i += 2) {
       points.push([OpacityPoints[i], OpacityPoints[i + 1]]);
@@ -42,9 +42,12 @@ function resetOpacityFunction(
   }
 }
 
-export function useVolumeThumbnailing(thumbnailSize: number) {
+export function useVolumeThumbnailing(
+  thumbnailSize: number,
+  createThumbnailer = createVolumeThumbnailer
+) {
   const thumbnails = reactive<Record<string, Record<string, string>>>({});
-  const thumbnailer = createVolumeThumbnailer(thumbnailSize);
+  const thumbnailer = createThumbnailer(thumbnailSize);
   const currentThumbnails = ref<Record<string, string>>({});
 
   const { currentImageMetadata, currentImageID, currentImageData } =
@@ -59,9 +62,15 @@ export function useVolumeThumbnailing(thumbnailSize: number) {
 
   // used to interrupt a thumbnailing cycle if
   // doThumbnailing is called again
+  const UNMOUNTED = Symbol('unmount');
   let interruptSentinel = Symbol('interrupt');
 
+  // captures finish on a timer, so deletion waits for the in-flight ones
+  const inFlightCaptures = new Set<Promise<string>>();
+
   async function doThumbnailing(imageID: string, image: vtkImageData) {
+    if (interruptSentinel === UNMOUNTED) return;
+
     const localSentinel = Symbol('interrupt');
     interruptSentinel = localSentinel;
 
@@ -102,13 +111,22 @@ export function useVolumeThumbnailing(thumbnailSize: number) {
       );
 
       thumbnailer.resetCameraWithOrientation(
-        cameraDirVec.value as Vector3,
-        cameraUpVec.value as Vector3
+        cameraDirVec.value,
+        cameraUpVec.value
       );
 
       const renWin = thumbnailer.scene.getRenderWindow();
       renWin.render();
-      const imageURL = await renWin.captureImages()[0];
+      const capture = renWin.captureImages()[0];
+      inFlightCaptures.add(capture);
+      const imageURL = await capture.finally(() => {
+        inFlightCaptures.delete(capture);
+      });
+
+      // the capture spans a render, so the cycle may have been superseded
+      if (interruptSentinel !== localSentinel) return;
+      if (imageID !== currentImageID.value) return;
+
       if (imageURL) {
         thumbnails[imageID][presetName] = imageURL;
       }
@@ -117,7 +135,7 @@ export function useVolumeThumbnailing(thumbnailSize: number) {
     PresetNameList.reduce(
       (promise, presetName) => promise.then(() => helper(presetName)),
       Promise.resolve()
-    );
+    ).catch(logError);
   }
 
   // workaround for computed not properly working on deeply reactive objects
@@ -134,7 +152,10 @@ export function useVolumeThumbnailing(thumbnailSize: number) {
 
   // force thumbnailing to stop
   onBeforeUnmount(() => {
-    interruptSentinel = Symbol('unmount');
+    interruptSentinel = UNMOUNTED;
+    Promise.allSettled([...inFlightCaptures])
+      .then(() => thumbnailer.delete())
+      .catch(logError);
   });
 
   // trigger thumbnailing

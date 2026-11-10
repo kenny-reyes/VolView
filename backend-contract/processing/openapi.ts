@@ -429,11 +429,11 @@ const paths = (): Record<string, unknown> => ({
           description:
             'The resolved results as the { resultState, intents, missing } envelope ' +
             '(JobResults). Each entry of `intents` is a ResultIntent — a result ' +
-            'row carrying a required `id` display key and required `name`/`url`, ' +
-            'plus optional/null `mimeType`/`size` file metadata. `missing` counts ' +
-            'declared outputs that never arrived plus recorded outputs that cannot ' +
-            'be read. Total loss is a valid incomplete response with an empty ' +
-            'intents array.',
+            'row carrying a required `id` display key, unique within the job, and ' +
+            'required `name`/`url`, plus optional/null `mimeType`/`size` file ' +
+            'metadata. `missing` counts declared outputs that never arrived plus ' +
+            'recorded outputs that cannot be read. Total loss is a valid ' +
+            'incomplete response with an empty intents array.',
           content: json(ref('JobResults')),
         },
         '409': resultReadErrorResponse,
@@ -474,7 +474,7 @@ export const buildOpenApiDocument = (): Record<string, unknown> => ({
     // VERSION / specVersion) below. It is deliberately literal, not derived from
     // the shape-version constants — the artifact and the shapes version on
     // separate clocks.
-    version: '0.2.0',
+    version: '0.3.0',
     description:
       'DRAFT 0.x — shapes may change until a second backend passes the ' +
       'conformance kit (the pinned 1.0 criterion). ' +

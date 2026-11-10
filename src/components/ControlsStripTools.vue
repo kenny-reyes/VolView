@@ -9,15 +9,29 @@
       v-slot:default="{ active, toggle }"
       :value="Tools.WindowLevel"
     >
-      <menu-control-button
-        icon="mdi-circle-half-full"
-        :name="`Window & Level [${nameToShortcut['Window & Level']}]`"
-        :active="active"
-        :disabled="noCurrentImage"
-        @click="toggle"
+      <v-tooltip
+        :text="windowingUnavailableReason"
+        :disabled="!windowingUnavailableReason"
+        location="right"
       >
-        <window-level-controls />
-      </menu-control-button>
+        <template #activator="{ props: tooltipProps }">
+          <span
+            v-bind="tooltipProps"
+            :tabindex="windowingUnavailableReason ? 0 : undefined"
+            data-testid="windowing-tool"
+          >
+            <menu-control-button
+              icon="mdi-circle-half-full"
+              :name="`Window & Level [${nameToShortcut['Window & Level']}]`"
+              :active="active"
+              :disabled="!!windowingUnavailableReason"
+              @click="toggle"
+            >
+              <window-level-controls />
+            </menu-control-button>
+          </span>
+        </template>
+      </v-tooltip>
     </groupable-item>
     <groupable-item v-slot:default="{ active, toggle }" :value="Tools.Pan">
       <control-button
@@ -68,9 +82,7 @@
         icon="mdi-brush"
         :name="`Paint [${nameToShortcut['Paint']}]`"
         :buttonClass="['tool-btn', active ? 'tool-btn-selected' : '']"
-        :disabled="
-          noCurrentImage || isObliqueLayout || isDisallowedOnCine(Tools.Paint)
-        "
+        :disabled="!!paintUnavailableReason"
         @click="toggle"
       ></control-button>
     </groupable-item>
@@ -78,40 +90,31 @@
       v-slot:default="{ active, toggle }"
       :value="Tools.Rectangle"
     >
-      <menu-control-button
+      <control-button
         icon="mdi-vector-square"
         :name="`Rectangle [${nameToShortcut['Rectangle']}]`"
-        :mobileOnlyMenu="true"
-        :active="active"
+        :buttonClass="['tool-btn', active ? 'tool-btn-selected' : '']"
         :disabled="noCurrentImage || isObliqueLayout"
         @click="toggle"
-      >
-        <rectangle-controls />
-      </menu-control-button>
+      />
     </groupable-item>
     <groupable-item v-slot:default="{ active, toggle }" :value="Tools.Polygon">
-      <menu-control-button
+      <control-button
         icon="mdi-pentagon-outline"
         :name="`Polygon [${nameToShortcut['Polygon']}]`"
-        :mobileOnlyMenu="true"
-        :active="active"
+        :buttonClass="['tool-btn', active ? 'tool-btn-selected' : '']"
         :disabled="noCurrentImage || isObliqueLayout"
         @click="toggle"
-      >
-        <polygon-controls />
-      </menu-control-button>
+      />
     </groupable-item>
     <groupable-item v-slot:default="{ active, toggle }" :value="Tools.Ruler">
-      <menu-control-button
+      <control-button
         icon="mdi-ruler"
         :name="`Ruler [${nameToShortcut['Ruler']}]`"
-        :mobileOnlyMenu="true"
-        :active="active"
+        :buttonClass="['tool-btn', active ? 'tool-btn-selected' : '']"
         :disabled="noCurrentImage || isObliqueLayout"
         @click="toggle"
-      >
-        <ruler-controls />
-      </menu-control-button>
+      />
     </groupable-item>
 
     <div class="my-1 tool-separator" />
@@ -134,8 +137,7 @@
 </template>
 
 <script lang="ts">
-import { computed, defineComponent, ref, watch } from 'vue';
-import { onKeyDown, useMagicKeys } from '@vueuse/core';
+import { computed, defineComponent, watch } from 'vue';
 import { Tools } from '@/src/store/tools/types';
 import ControlButton from '@/src/components/ControlButton.vue';
 import ItemGroup from '@/src/components/ItemGroup.vue';
@@ -146,13 +148,15 @@ import { toRef } from 'vue';
 import MenuControlButton from '@/src/components/MenuControlButton.vue';
 import CropControls from '@/src/components/tools/crop/CropControls.vue';
 import ResetViews from '@/src/components/tools/ResetViews.vue';
-import RulerControls from '@/src/components/RulerControls.vue';
-import RectangleControls from '@/src/components/RectangleControls.vue';
-import PolygonControls from '@/src/components/PolygonControls.vue';
 import WindowLevelControls from '@/src/components/tools/windowing/WindowLevelControls.vue';
-import { actionToKey } from '@/src/composables/useKeyboardShortcuts';
+import {
+  actionToKey,
+  readableBinding,
+  useActionHeld,
+} from '@/src/composables/useKeyboardShortcuts';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import { useViewStore } from '@/src/store/views';
+import { isCineImage } from '@/src/core/cine/isCineImage';
 
 export default defineComponent({
   components: {
@@ -162,47 +166,50 @@ export default defineComponent({
     GroupableItem,
     CropControls,
     ResetViews,
-    RulerControls,
-    RectangleControls,
-    PolygonControls,
     WindowLevelControls,
   },
   setup() {
     const toolStore = useToolStore();
     const viewStore = useViewStore();
 
-    const { currentImageID } = useCurrentImage();
+    const { currentImageID, currentImageData } = useCurrentImage();
     const noCurrentImage = computed(() => !currentImageID.value);
     const currentTool = computed(() => toolStore.currentTool);
+
+    const windowingUnavailableReason = computed(() => {
+      if (!currentImageID.value) return 'Load an image to adjust window/level.';
+      const scalars = currentImageData.value?.getPointData().getScalars();
+      if (!scalars) return 'The image must finish loading first.';
+      if (isCineImage(currentImageID.value))
+        return 'Cine images already contain display-encoded pixels.';
+      const components = scalars.getNumberOfComponents();
+      if (components === 3 || components === 4)
+        return 'RGB and RGBA images use their original colors.';
+      return '';
+    });
 
     const activeViewRef = toRef(viewStore, 'activeView');
     const activeEffective = useEffectiveView(
       computed(() => activeViewRef.value ?? '')
     );
+
     // The rendered viewer is decided by effective kind, not stored slot type:
     // a cine clip dropped into an Oblique slot still renders as cine, so the
     // toolbar should treat it as cine, not Oblique.
     const isObliqueLayout = computed(
       () => activeEffective.value?.kind === 'oblique'
     );
+
     const isCineActive = computed(() => activeEffective.value?.kind === 'cine');
     const isDisallowedOnCine = (tool: Tools) =>
       isCineActive.value && !isToolAllowedFor(tool, activeEffective.value);
 
-    const paintMenu = ref(false);
-    const cropMenu = ref(false);
-    const windowingMenu = ref(false);
-
-    onKeyDown('Escape', () => {
-      paintMenu.value = false;
-      cropMenu.value = false;
-      windowingMenu.value = false;
-    });
-
-    const keys = useMagicKeys();
-    const enableTempCrosshairs = computed(
-      () => keys[actionToKey.value.temporaryCrosshairs].value
+    const paintUnavailableReason = computed(
+      () => toolStore.paintUnavailableReason
     );
+
+    const enableTempCrosshairs = useActionHeld('temporaryCrosshairs');
+
     watch(enableTempCrosshairs, (enable) => {
       if (enable) toolStore.activateTemporaryCrosshairs();
       else toolStore.deactivateTemporaryCrosshairs();
@@ -212,16 +219,16 @@ export default defineComponent({
     const nameToShortcut = computed(() => {
       const keyMap = actionToKey.value;
       return {
-        'Window & Level': keyMap.windowLevel,
-        Pan: keyMap.pan,
-        Zoom: keyMap.zoom,
-        Crosshairs: keyMap.crosshairs,
-        Select: keyMap.select,
-        Paint: keyMap.paint,
-        Rectangle: keyMap.rectangle,
-        Polygon: keyMap.polygon,
-        Ruler: keyMap.ruler,
-        Crop: keyMap.crop,
+        'Window & Level': readableBinding(keyMap.windowLevel),
+        Pan: readableBinding(keyMap.pan),
+        Zoom: readableBinding(keyMap.zoom),
+        Crosshairs: readableBinding(keyMap.crosshairs),
+        Select: readableBinding(keyMap.select),
+        Paint: readableBinding(keyMap.paint),
+        Rectangle: readableBinding(keyMap.rectangle),
+        Polygon: readableBinding(keyMap.polygon),
+        Ruler: readableBinding(keyMap.ruler),
+        Crop: readableBinding(keyMap.crop),
       };
     });
 
@@ -229,12 +236,11 @@ export default defineComponent({
       currentTool,
       setCurrentTool: toolStore.setCurrentTool,
       noCurrentImage,
+      windowingUnavailableReason,
       isObliqueLayout,
       isDisallowedOnCine,
+      paintUnavailableReason,
       Tools,
-      paintMenu,
-      cropMenu,
-      windowingMenu,
       nameToShortcut,
     };
   },
@@ -243,24 +249,16 @@ export default defineComponent({
 
 <style>
 .tool-btn-selected {
-  background-color: rgb(var(--v-theme-selection-bg-color));
+  background-color: rgb(var(--v-theme-primary-darken-1));
+  color: rgb(var(--v-theme-on-primary-darken-1));
 }
 </style>
 
 <style scoped>
-.menu-more {
-  position: absolute;
-  right: -10%;
-}
-
 .tool-separator {
   width: 75%;
   height: 1px;
   border: none;
-  border-top: 1px solid rgb(112, 112, 112);
-}
-
-.popup-menu {
-  max-width: 400px; /* a little less than v-navigation-drawer in App.vue */
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.3);
 }
 </style>

@@ -3,7 +3,7 @@
 // frame N. A regression in either the zod schema or addTool defaults would
 // silently lose the per-frame association.
 import * as path from 'path';
-import { CINE_US_DATASET } from './configTestUtils';
+import { CINE_US_DATASET } from '../datasets';
 import { openUrls, SESSION_SAVE_TIMEOUT, waitForFileExists } from './utils';
 import { volViewPage } from '../pageobjects/volview.page';
 import { TEMP_DIR } from '../../wdio.shared.conf';
@@ -16,6 +16,7 @@ import {
   retreatCineFrame,
   waitForFrame,
 } from './cineTestUtils';
+import { openSegmentShapes } from './segmentationTestUtils';
 
 const placeRulerAtCanvasCenter = async () => {
   const rulerToolButton = await $('button span i[class~=mdi-ruler]');
@@ -64,15 +65,10 @@ describe('Cine ruler survives save/reload at its placed frame', () => {
     // before asserting visibility on the canvas. The list entry proves
     // deserialization has completed, so the subsequent canvas checks
     // can't race the load.
-    const annotationsTab = await $(
-      'button[data-testid="module-tab-Annotations"]'
-    );
-    await annotationsTab.click();
-    const measurementsTab = await $('button.v-tab*=Measurements');
-    await measurementsTab.waitForClickable();
-    await measurementsTab.click();
+    await openSegmentShapes();
     await browser.waitUntil(
-      async () => (await $$('.v-list-item i.mdi-ruler.tool-icon').length) >= 1,
+      async () =>
+        (await $$('[data-testid="segment-shape-row"] i.mdi-ruler').length) >= 1,
       {
         timeoutMsg:
           'Expected the deserialized ruler entry to appear in the list',

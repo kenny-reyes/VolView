@@ -9,7 +9,10 @@ import vtkLookupTableProxy from '@kitware/vtk.js/Proxy/Core/LookupTableProxy';
 import { vec3 } from 'gl-matrix';
 import type { Vector3 } from '@kitware/vtk.js/types';
 import vtkVolumeProperty from '@kitware/vtk.js/Rendering/Core/VolumeProperty';
+import vtkOpenGLRenderWindow from '@kitware/vtk.js/Rendering/OpenGL/RenderWindow';
 import { getDiagonalLength } from '@kitware/vtk.js/Common/DataModel/BoundingBox';
+import { beginContextRelease } from '@/src/core/vtk/releaseRenderWindow';
+import { deleteInteractor } from '@/src/core/vtk/deleteInteractor';
 
 export function createRenderingPipeline() {
   const actor = vtkVolume.newInstance();
@@ -106,7 +109,7 @@ export function createVolumeThumbnailer(size: number) {
       }
     },
     resetCameraWithOrientation(direction: Vector3, up: Vector3) {
-      const image = mapper.getInputData() as vtkImageData | null;
+      const image = mapper.getInputData<vtkImageData | null>();
       if (image) {
         const camera = renderer.getActiveCamera();
         const bounds = image.getBounds();
@@ -126,6 +129,33 @@ export function createVolumeThumbnailer(size: number) {
         // ensure correct lighting post camera manip
         renderer.updateLightsGeometryToFollowCamera();
       }
+    },
+    delete() {
+      renderer.removeVolume(actor);
+      // scene.delete() deletes the API specific render window, so the context
+      // can only be handed back afterwards
+      const apiRenderWindow =
+        scene.getApiSpecificRenderWindow() as vtkOpenGLRenderWindow;
+      const loseContext = beginContextRelease(apiRenderWindow);
+      const interactor = scene.getInteractor();
+      const renderWindow = scene.getRenderWindow();
+      try {
+        // nothing that walks the render window's view list should reach the
+        // deleted view
+        renderWindow.removeView(apiRenderWindow);
+        scene.delete();
+        deleteInteractor(interactor);
+      } finally {
+        loseContext();
+      }
+      renderWindow.delete();
+      renderer.delete();
+      actor.delete();
+      mapper.delete();
+      opacityFuncProxy.delete();
+      colorTransferFuncProxy.delete();
+      pipeline.cfun.delete();
+      pipeline.ofun.delete();
     },
   };
 }

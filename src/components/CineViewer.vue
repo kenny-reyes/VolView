@@ -7,9 +7,17 @@
     @focusin="hover = true"
     @focusout="hover = false"
   >
-    <div class="vtk-gutter mt-1">
-      <v-btn dark icon size="medium" variant="text" @click="resetCamera">
-        <v-icon size="medium" class="py-1">mdi-camera-flip-outline</v-icon>
+    <div class="vtk-gutter">
+      <v-btn
+        color="white"
+        icon
+        size="medium"
+        variant="text"
+        @click="resetCamera"
+      >
+        <v-icon size="medium" class="py-1 view-control-icon"
+          >mdi-camera-flip-outline</v-icon
+        >
         <v-tooltip
           location="right"
           activator="parent"
@@ -144,6 +152,7 @@ import vtkMouseCameraTrackballZoomToMouseManipulator from '@kitware/vtk.js/Inter
 import { useResetViewsEvents } from '@/src/components/tools/ResetViews.vue';
 import { onVTKEvent } from '@/src/composables/onVTKEvent';
 import { get2DViewingVectors } from '@/src/utils/getViewingVectors';
+import { isToolVisible } from '@/src/composables/annotationTool';
 import type { LPSAxis } from '@/src/types/lps';
 
 type Props = {
@@ -195,7 +204,7 @@ const selectionPoints = computed(() => {
       ({ tool }) =>
         tool.imageID === currentImageID.value &&
         tool.frame === currentFrame.value &&
-        !tool.hidden
+        isToolVisible(tool)
     )
     .flatMap(({ store, tool }) => store.getPoints(tool.id));
 });

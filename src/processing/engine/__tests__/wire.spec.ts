@@ -154,13 +154,13 @@ describe('parseResults', () => {
     );
   });
 
-  it('preserves a segment-group result with descriptors and unknown keys', () => {
+  it('preserves a segmentation result with descriptors and unknown keys', () => {
     const intents = [
       {
         id: 'r1',
         name: 'seg.nrrd',
         url: 'https://example/seg.nrrd',
-        intent: 'add-segment-group',
+        intent: 'import-segmentation',
         segments: [{ value: 1, name: 'liver', color: [255, 0, 0, 255] }],
         extra: 'keep-me',
       },
@@ -176,7 +176,7 @@ describe('parseResults', () => {
         id: 'r1',
         name: 'seg.nrrd',
         url: 'https://example/seg.nrrd',
-        intent: 'add-segment-group',
+        intent: 'import-segmentation',
         segments: [{ value: 0, name: 'bg', color: [300, -5, 0, 255] }],
       },
     ];

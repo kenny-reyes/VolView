@@ -3,9 +3,6 @@ import { areEquals } from '@kitware/vtk.js/Common/Core/Math';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import type { Vector3 } from '@kitware/vtk.js/types';
 import { vec3 } from 'gl-matrix';
-import type { mat4 } from 'gl-matrix';
-import { getLPSDirections } from '@/src/utils/lps';
-import type { LPSAxis, LPSDirections } from '@/src/types/lps';
 
 // give more fp tolerance due to transforms
 const RELAXED_EPSILON = EPSILON * 1e2;
@@ -17,7 +14,7 @@ function getImageWorldCorners(im: vtkImageData) {
     for (let j = 0; j < 2; j++) {
       for (let k = 0; k < 2; k++) {
         worldCorners.push(
-          im.indexToWorld([extent[i], extent[j], extent[k]]) as Vector3
+          im.indexToWorld([extent[i], extent[2 + j], extent[4 + k]]) as Vector3
         );
       }
     }
@@ -43,6 +40,42 @@ export function compareImageSpaces(
   return corners1.every((p1) => corners2.some((p2) => areEquals(p1, p2, eps)));
 }
 
+export function compareImageIndexGrids(
+  im1: vtkImageData,
+  im2: vtkImageData,
+  eps = RELAXED_EPSILON
+) {
+  const extent1 = im1.getExtent();
+  const extent2 = im2.getExtent();
+  if (
+    !extent1.every((value, index) => value === extent2[index]) ||
+    !areEquals([...im1.getIndexToWorld()], [...im2.getIndexToWorld()], eps)
+  ) {
+    return false;
+  }
+
+  // Small matrix differences can accumulate into significant voxel displacement.
+  const corners1 = getImageWorldCorners(im1);
+  const corners2 = getImageWorldCorners(im2);
+  return corners1.every((point, index) =>
+    areEquals(point, corners2[index], eps)
+  );
+}
+
+// Negative spacing stays usable because its sign places the voxels.
+export const isUsableSpacing = (value: number) =>
+  Number.isFinite(value) && value !== 0;
+
+// Returns the declared spacing when a repair was needed, otherwise null.
+export function repairUnusableSpacing(image: vtkImageData) {
+  const declared = image.getSpacing();
+  if (declared.every(isUsableSpacing)) return null;
+  image.setSpacing(
+    declared.map((value) => (isUsableSpacing(value) ? value : 1))
+  );
+  return declared;
+}
+
 /**
  * Convert a world point to image index space.
  */
@@ -59,29 +92,4 @@ export function indexPointToWorld(image: vtkImageData, indexPoint: vec3): vec3 {
   const worldPoint = vec3.create();
   vec3.transformMat4(worldPoint, indexPoint, image.getIndexToWorld());
   return worldPoint;
-}
-
-/**
- * Convert a slice index from source image space to target image space.
- * Used when source and target have different coordinate systems.
- */
-export function convertSliceIndex(
-  sourceSlice: number,
-  sourceLps: LPSDirections,
-  sourceIndexToWorld: mat4,
-  targetImage: vtkImageData,
-  axis: LPSAxis
-): number {
-  const sourceIjkIndex = sourceLps[axis];
-  const targetLps = getLPSDirections(targetImage.getDirection());
-  const targetIjkIndex = targetLps[axis];
-
-  const sourceIndexPoint = vec3.fromValues(0, 0, 0);
-  sourceIndexPoint[sourceIjkIndex] = sourceSlice;
-
-  const worldPoint = vec3.create();
-  vec3.transformMat4(worldPoint, sourceIndexPoint, sourceIndexToWorld);
-
-  const targetIndexPoint = worldPointToIndex(targetImage, worldPoint);
-  return Math.round(targetIndexPoint[targetIjkIndex]);
 }

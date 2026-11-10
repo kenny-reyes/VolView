@@ -96,22 +96,18 @@ class VolViewPage extends Page {
     );
   }
 
-  get rectangleButton() {
-    return $('button span i[class~=mdi-vector-square]');
+  async selectTool(icon: string) {
+    const button = $(`button.tool-btn i[class~=${icon}]`);
+    await button.waitForClickable();
+    await button.click();
   }
 
   async activateRectangle() {
-    const button = this.rectangleButton;
-    await button.click();
-  }
-
-  get paintButton() {
-    return $('button span i[class~=mdi-brush]');
+    await this.selectTool('mdi-vector-square');
   }
 
   async activatePaint() {
-    const button = this.paintButton;
-    await button.click();
+    await this.selectTool('mdi-brush');
   }
 
   // Paint "Process" mode and the Fill Holes process workflow.
@@ -157,11 +153,12 @@ class VolViewPage extends Page {
     return (classes ?? '').includes('v-btn--active');
   }
 
-  async paintStrokeOnView(view: ChainablePromiseElement) {
+  /** A square loop starting `offsetX` pixels right of the view's center. */
+  async paintStrokeOnView(view: ChainablePromiseElement, offsetX = 0) {
     const canvas = await view.$('canvas');
     const location = await canvas.getLocation();
     const size = await canvas.getSize();
-    const centerX = Math.round(location.x + size.width / 2);
+    const centerX = Math.round(location.x + size.width / 2) + offsetX;
     const centerY = Math.round(location.y + size.height / 2);
 
     await browser
@@ -218,16 +215,8 @@ class VolViewPage extends Page {
     return $('button[data-testid="module-tab-Annotations"]');
   }
 
-  get newSegmentGroupButton() {
-    return $('button*=New Group');
-  }
-
   get activeDialog() {
     return $('div[role="dialog"]');
-  }
-
-  get activeDialogInput() {
-    return this.activeDialog.$('input[placeholder="Unnamed Segment Group"]');
   }
 
   get saveSessionFilenameInput() {
@@ -238,28 +227,28 @@ class VolViewPage extends Page {
     return $('span[data-testid="save-session-confirm-button"]');
   }
 
-  get segmentGroupsTab() {
-    return $('button.v-tab*=Segment Groups');
+  get saveSegmentsButtons() {
+    return $$('button[data-testid="save-segments-button"]');
   }
 
-  get segmentGroupSaveButtons() {
-    return $$('button[data-testid="segment-group-save-button"]');
+  get segmentList() {
+    return $('[data-testid="segment-list"]');
   }
 
-  get saveSegmentGroupFilenameInput() {
+  get saveSegmentsFilenameInput() {
     return this.activeDialog.$('#filename');
   }
 
-  get saveSegmentGroupConfirmButton() {
+  get saveSegmentsConfirmButton() {
     return this.activeDialog.$('button=Save');
   }
 
-  async clickFirstSegmentGroupSaveButton() {
+  async clickSaveSegmentsButton() {
     await browser.waitUntil(async () => {
-      const buttons = await this.segmentGroupSaveButtons;
+      const buttons = await this.saveSegmentsButtons;
       return (await buttons.length) >= 1;
     });
-    const buttons = await this.segmentGroupSaveButtons;
+    const buttons = await this.saveSegmentsButtons;
     await buttons[0].scrollIntoView();
     await buttons[0].waitForClickable();
     await buttons[0].click();
@@ -288,31 +277,12 @@ class VolViewPage extends Page {
     return fileName;
   }
 
-  async createSegmentGroup(name: string) {
-    const annotationsTab = await this.annotationsModuleTab;
-    await annotationsTab.click();
-
-    const newGroup = await this.newSegmentGroupButton;
-    await newGroup.waitForClickable();
-    await newGroup.click();
-
-    const input = await this.activeDialogInput;
-    await input.waitForDisplayed();
-    await setValueVueInput(input, name);
-    await browser.keys([Key.Enter]);
-  }
-
-  get editLabelButtons() {
-    return $$('button[data-testid="edit-label-button"]');
-  }
-
-  get labelStrokeWidthInput() {
-    // there should only be one on the screen at any given time
-    return $('.label-stroke-width-input').$('input');
+  get segmentStrokeWidthSlider() {
+    return $('[role="slider"][aria-label="Stroke Width"]');
   }
 
   get editLabelModalDoneButton() {
-    return $('button[data-testid="edit-label-done-button"]');
+    return $('button[data-testid="segment-editor-done-button"]');
   }
 
   get datasetMenuButtons() {
@@ -481,10 +451,13 @@ class VolViewPage extends Page {
     timeout = DOWNLOAD_TIMEOUT
   ) {
     await browser.waitUntil(
-      async () => {
-        const loadingIndicator = await view.$('.loading-indicator');
-        return !(await loadingIndicator.isDisplayed());
-      },
+      () =>
+        view.execute((element) => {
+          const container = element.closest(
+            '[data-testid="two-view-container"]'
+          );
+          return !!container && !container.querySelector('.loading-indicator');
+        }),
       {
         timeout,
         timeoutMsg: 'Expected loading indicator to disappear',

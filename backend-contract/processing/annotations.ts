@@ -1,6 +1,9 @@
 // Vector annotations staged into a task or returned as a result. Coordinates
-// are world LPS millimeters. Tool records exclude session identity and state;
-// labels are namespaced by tool kind because the client stores are independent.
+// are world LPS millimeters. Tool records exclude session identity and state.
+// Labels are namespaced by tool kind on the wire, but the client binds every
+// kind into one segment registry by name: a name repeated across kinds is one
+// segment, the first kind to bind a new name (rulers, rectangles, polygons)
+// sets its style, and a label no tool references creates nothing.
 // Unknown envelope fields survive round-trip without gaining behavior.
 
 import { z } from 'zod';
@@ -89,9 +92,19 @@ export type WirePolygon = z.infer<typeof wirePolygonSchema>;
 
 // A label's style. Every field is optional: a label may exist purely as a name.
 export const annotationLabelSchema = z.strictObject({
-  color: z.string().optional(),
+  color: z
+    .string()
+    .optional()
+    .describe(
+      "A hex color such as `#d60000` or a CSS color keyword such as `lime`. It styles only a segment the label creates: a label whose name the client already holds keeps that segment's color and stroke width. Any other syntax, including functional forms such as `rgb()` and `hsl()`, is ignored and reported to the user, and a new segment then takes an automatic color."
+    ),
   strokeWidth: z.number().optional(),
-  fillColor: z.string().optional(),
+  fillColor: z
+    .string()
+    .optional()
+    .describe(
+      'Accepted so an existing producer keeps validating, and ignored on labels.'
+    ),
 });
 export type AnnotationLabel = z.infer<typeof annotationLabelSchema>;
 

@@ -1,7 +1,6 @@
 <script lang="ts">
 import vtkRulerWidget, {
   InteractionState,
-  vtkRulerViewWidget,
   vtkRulerWidgetState,
 } from '@/src/vtk/RulerWidget';
 import {
@@ -79,9 +78,7 @@ export default defineComponent({
       id: toolId.value,
       isPlaced: !isPlacing.value,
     });
-    const widget = view.widgetManager.addWidget(
-      widgetFactory
-    ) as vtkRulerViewWidget;
+    const widget = view.widgetManager.addWidget(widgetFactory)!;
 
     onUnmounted(() => {
       view.widgetManager.removeWidget(widget);
@@ -122,6 +119,7 @@ export default defineComponent({
 
     const manipulator = vtkPlaneManipulator.newInstance();
     widget.setManipulator(manipulator);
+    onUnmounted(() => manipulator.delete());
 
     watchEffect(() => {
       updatePlaneManipulatorFor2DView(
@@ -161,6 +159,7 @@ export default defineComponent({
     return {
       ruler,
       slice,
+      appearance: computed(() => rulerStore.appearanceOfTool(toolId.value)),
       firstPoint: computed(() => {
         return visibleStates.firstPoint ? ruler.value?.firstPoint : undefined;
       }),
@@ -178,8 +177,8 @@ export default defineComponent({
     v-show="slice === ruler.slice"
     :point1="firstPoint"
     :point2="secondPoint"
-    :color="ruler.color"
-    :strokeWidth="ruler.strokeWidth"
+    :color="appearance.cssColor"
+    :stroke-width="appearance.strokeWidth"
     :length="length"
   />
 </template>

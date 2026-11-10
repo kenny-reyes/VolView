@@ -12,6 +12,7 @@ import type {
   CineParseResult,
 } from '@/src/core/cine/parseCineDicom';
 import { useImageCacheStore } from '@/src/store/image-cache';
+import { instanceTags } from '@/src/store/__tests__/dicomTagFixtures';
 import { isCineChunkGroup, useDICOMStore } from '@/src/store/datasets-dicom';
 
 const mocks = vi.hoisted(() => {
@@ -66,10 +67,12 @@ const mocks = vi.hoisted(() => {
   };
 });
 
+// eslint-disable-next-line no-restricted-syntax -- DICOM splitting runs in wasm; unavailable in the node test environment
 vi.mock('@/src/io/dicom', () => ({
   splitAndSort: mocks.splitAndSort,
 }));
 
+// eslint-disable-next-line no-restricted-syntax -- reads real DICOM bytes through wasm
 vi.mock('@/src/core/cine/parseCineDicom', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@/src/core/cine/parseCineDicom')>();
@@ -79,34 +82,22 @@ vi.mock('@/src/core/cine/parseCineDicom', async (importOriginal) => {
   };
 });
 
+// eslint-disable-next-line no-restricted-syntax -- needs a streaming chunk source the node environment cannot provide
 vi.mock('@/src/core/streaming/dicomChunkImage', () => ({
   default: mocks.MockDicomChunkImage,
 }));
 
 function metadata(overrides: Record<string, string> = {}) {
-  return (
-    [
-      [Tags.SOPClassUID, SOP_CLASS_ULTRASOUND_MULTIFRAME],
-      [Tags.NumberOfFrames, '2'],
-      [Tags.SOPInstanceUID, 'sop-uid'],
-      [Tags.PatientID, 'patient-1'],
-      [Tags.PatientName, 'Test Patient'],
-      [Tags.PatientBirthDate, ''],
-      [Tags.PatientSex, ''],
-      [Tags.StudyID, 'study-1'],
-      [Tags.StudyInstanceUID, 'study-uid'],
-      [Tags.StudyDate, ''],
-      [Tags.StudyTime, ''],
-      [Tags.AccessionNumber, ''],
-      [Tags.StudyDescription, ''],
-      [Tags.Modality, 'US'],
-      [Tags.SeriesInstanceUID, 'series-uid'],
-      [Tags.SeriesNumber, '7'],
-      [Tags.SeriesDescription, 'Unsupported native cine'],
-      [Tags.WindowLevel, ''],
-      [Tags.WindowWidth, ''],
-    ] as [string, string][]
-  ).map(([tag, value]) => [tag, overrides[tag] ?? value]) as [string, string][];
+  return instanceTags({
+    sopClassUid: SOP_CLASS_ULTRASOUND_MULTIFRAME,
+    numberOfFrames: '2',
+    sopInstanceUid: 'sop-uid',
+    modality: 'US',
+    seriesDescription: 'Unsupported native cine',
+  }).map(([tag, value]) => [tag, overrides[tag] ?? value]) as [
+    string,
+    string,
+  ][];
 }
 
 function cineHeader(overrides: Partial<CineHeader> = {}): CineHeader {

@@ -8,23 +8,25 @@ import {
   toRefs,
   watchEffect,
   inject,
+  ref,
 } from 'vue';
-import { useMagicKeys } from '@vueuse/core';
 import vtkPlaneManipulator from '@kitware/vtk.js/Widgets/Manipulators/PlaneManipulator';
 import { vec3 } from 'gl-matrix';
 import { getLPSAxisFromDir } from '@/src/utils/lps';
 import { useImage } from '@/src/composables/useCurrentImage';
 import { updatePlaneManipulatorFor2DView } from '@/src/utils/manipulators';
 import { usePaintToolStore } from '@/src/store/tools/paint';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
-import { vtkPaintViewWidget } from '@/src/vtk/PaintWidget';
+import { useViewStore } from '@/src/store/views';
 import { LPSAxisDir } from '@/src/types/lps';
-import { getLPSDirections } from '@/src/utils/lps';
 import { onVTKEvent } from '@/src/composables/onVTKEvent';
 import { useSliceInfo } from '@/src/composables/useSliceInfo';
 import { VtkViewContext } from '@/src/components/vtk/context';
 import { Maybe } from '@/src/types';
-import { actionToKey } from '@/src/composables/useKeyboardShortcuts';
+import { PaintMode } from '@/src/core/tools/paint';
+import { usePaintInteractionMode } from '@/src/segmentation/composables/usePaintInteractionMode';
+import { useSegmentStore } from '@/src/segmentation/segments';
+import eyedropperCursor from '@/src/assets/eyedropper-cursor.svg?url';
+import { useActionHeld } from '@/src/composables/useKeyboardShortcuts';
 
 export default defineComponent({
   name: 'PaintWidget2D',
@@ -49,7 +51,11 @@ export default defineComponent({
     const slice = computed(() => sliceInfo.value?.slice);
 
     const paintStore = usePaintToolStore();
-    const segmentGroupStore = useSegmentGroupStore();
+    const viewStore = useViewStore();
+    const interactionMode = usePaintInteractionMode();
+    const sampling = computed(
+      () => interactionMode.value === PaintMode.Eyedropper
+    );
     const widgetFactory = paintStore.getWidgetFactory();
     const widgetState = widgetFactory.getWidgetState();
 
@@ -59,46 +65,45 @@ export default defineComponent({
       () => imageMetadata.value.lpsOrientation[viewAxis.value]
     );
 
-    // Get the active labelmap for coordinate transforms
-    const activeLabelmap = computed(() => {
-      const groupId = paintStore.activeSegmentGroupID;
-      if (!groupId) return null;
-      return segmentGroupStore.dataIndex[groupId] ?? null;
-    });
-
-    const widget = view.widgetManager.addWidget(
-      widgetFactory
-    ) as vtkPaintViewWidget;
+    const widget = view.widgetManager.addWidget(widgetFactory)!;
+    widget.setPickable(false);
 
     // --- widget representation config --- //
 
+    const { segments } = useSegmentStore();
     watchEffect(() => {
-      if (!widget) return;
-
-      const labelmap = activeLabelmap.value;
-      if (labelmap) {
-        // Use labelmap's transforms so brush preview matches where paint appears
-        const labelmapLps = getLPSDirections(labelmap.getDirection());
-        const slicingIndex = labelmapLps[viewAxis.value];
-        widget.setSlicingIndex(slicingIndex);
-        widget.setIndexToWorld(labelmap.getIndexToWorld());
-        widget.setWorldToIndex(labelmap.getWorldToIndex());
-      } else {
-        // Fall back to parent image transforms
-        const metadata = imageMetadata.value;
-        const slicingIndex = metadata.lpsOrientation[viewAxis.value];
-        widget.setSlicingIndex(slicingIndex);
-        widget.setIndexToWorld(metadata.indexToWorld);
-        widget.setWorldToIndex(metadata.worldToIndex);
-      }
+      const [r, g, b] = segments.appearanceOf(
+        segments.selectedSegmentId.value
+      ).color;
+      widgetState.getBrush().setColor3([r, g, b]);
     });
+
+    // Every mask uses the parent voxel grid. Selection and mask growth do not
+    // change the brush's world-space footprint.
+    watchEffect(() => {
+      const metadata = imageMetadata.value;
+      widget.setSlicingIndex(metadata.lpsOrientation[viewAxis.value]);
+      widget.setIndexToWorld(metadata.indexToWorld);
+      widget.setWorldToIndex(metadata.worldToIndex);
+    });
+
+    // Brush movement changes shared state, but only the view displaying the
+    // preview needs to redraw. Mask edits request renders independently.
+    onVTKEvent(widgetState, 'onModified', () => {
+      if (widget.getVisibility()) view.requestRender();
+    });
+    onVTKEvent(widget, 'onModified', () => view.requestRender());
 
     // --- interaction --- //
 
-    onVTKEvent(widget, 'onStartInteractionEvent', () => {
+    onVTKEvent(widget, 'onStartInteractionEvent', (event) => {
       if (!imageId.value) return;
-      paintStore.setSliceAxis(viewAxisIndex.value, imageId.value);
       const origin = widgetState.getBrush().getOrigin()!;
+      if (event?.sampling) {
+        paintStore.selectSegmentAt(vec3.clone(origin), imageId.value);
+        return;
+      }
+      paintStore.setSliceAxis(viewAxisIndex.value, imageId.value);
       paintStore.startStroke(
         vec3.clone(origin),
         viewAxisIndex.value,
@@ -131,6 +136,7 @@ export default defineComponent({
 
     const manipulator = vtkPlaneManipulator.newInstance();
     widget.setManipulator(manipulator);
+    onUnmounted(() => manipulator.delete());
 
     watchEffect(() => {
       if (slice.value == null) return;
@@ -145,26 +151,41 @@ export default defineComponent({
     // --- visibility --- //
 
     let checkIfPointerInView = false;
-
-    // Turn on widget visibility and update stencil if mouse starts within view
-    onVTKEvent(view.interactor, 'onMouseMove', () => {
-      if (!checkIfPointerInView) return;
-      checkIfPointerInView = false;
-      widget.setVisibility(true);
-      if (imageId.value) {
+    const pointerInView = ref(false);
+    watchEffect(() => {
+      if (pointerInView.value && imageId.value) {
         paintStore.setSliceAxis(viewAxisIndex.value, imageId.value);
       }
     });
+    const cursorStyles = view.widgetManager.getCursorStyles();
+    watchEffect(() => {
+      widget.setSampling(sampling.value);
+      widget.setVisibility(pointerInView.value && !sampling.value);
+      const cursor = sampling.value
+        ? `url("${eyedropperCursor}") 2 22, crosshair`
+        : cursorStyles.default;
+      view.widgetManager.setCursorStyles(
+        sampling.value
+          ? { ...cursorStyles, default: cursor, hover: cursor }
+          : cursorStyles
+      );
+      view.renderWindowView.set({ cursor });
+    });
+
+    // Turn on widget visibility and update stencil if mouse starts within view
+    const showPreviewOnFirstMove = () => {
+      if (!checkIfPointerInView) return;
+      checkIfPointerInView = false;
+      pointerInView.value = true;
+    };
+    onVTKEvent(view.interactor, 'onMouseMove', showPreviewOnFirstMove);
 
     onVTKEvent(view.interactor, 'onMouseEnter', () => {
-      if (imageId.value) {
-        paintStore.setSliceAxis(viewAxisIndex.value, imageId.value);
-      }
-      widget.setVisibility(true);
+      pointerInView.value = true;
     });
 
     onVTKEvent(view.interactor, 'onMouseLeave', () => {
-      widget.setVisibility(false);
+      pointerInView.value = false;
     });
 
     watchEffect(() => {
@@ -172,22 +193,20 @@ export default defineComponent({
     });
 
     // Brush size scroll wheel control with customizable modifier key
-    const keys = useMagicKeys();
-    const enableBrushSizeAdjustment = computed(
-      () => keys[actionToKey.value.brushSizeModifier].value
-    );
+    const enableBrushSizeAdjustment = useActionHeld('brushSizeModifier');
 
     const handleWheelEvent = (event: WheelEvent) => {
       if (!enableBrushSizeAdjustment.value) return;
       event.preventDefault();
+      viewStore.setActiveView(viewId.value);
       const delta = event.deltaY < 0 ? 1 : -1;
-      const newSize = Math.max(1, Math.min(50, paintStore.brushSize + delta));
-      paintStore.setBrushSize(newSize);
+      paintStore.setBrushSize(paintStore.brushSize + delta);
     };
 
     onMounted(() => {
-      view.widgetManager.renderWidgets();
       view.widgetManager.grabFocus(widget);
+      // grabFocus fires no manager event; this re-reads picking for the focus.
+      view.widgetManager.renderWidgets();
       widget.setVisibility(false);
       checkIfPointerInView = true;
       view.renderWindowView
@@ -196,6 +215,8 @@ export default defineComponent({
     });
 
     onUnmounted(() => {
+      view.widgetManager.setCursorStyles(cursorStyles);
+      view.renderWindowView.set({ cursor: cursorStyles.default });
       view.widgetManager.removeWidget(widgetFactory);
       view.renderWindowView
         .getContainer()

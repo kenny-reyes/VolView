@@ -4,11 +4,12 @@ import MRAHeadThumbnail from '@/src/assets/samples/MRA-Head_and_Neck.jpg';
 import CTAHeadThumbnail from '@/src/assets/samples/CTA-Head_and_Neck.jpg';
 import USFetusThumbnail from '@/src/assets/samples/3DUS-Fetus.jpg';
 import USCineThumbnail from '@/src/assets/samples/US-Cine.jpg';
-import { SegmentMask } from '@/src/types/segment';
+import { PET_CT_URLS } from './samples/petCT';
+import PETCTChestThumbnail from '@/src/assets/samples/PET-CT-Chest.png';
 import type { LayoutConfig } from './utils/layoutParsing';
 import type { ViewInfoInit } from './types/views';
 import { SampleDataset } from './types';
-import { Action } from './constants';
+import { Action, Binding, perSegmentShortcut } from './constants';
 
 /**
  * These are the initial view IDs.
@@ -158,6 +159,12 @@ export const SAMPLE_DATA: SampleDataset[] = [
     url: 'https://raw.githubusercontent.com/pydicom/pydicom/v3.0.1/src/pydicom/data/test_files/examples_ybr_color.dcm',
     image: USCineThumbnail,
   },
+  {
+    name: 'PET/CT Chest',
+    description: 'PET layered over chest CT. 6 MB',
+    urls: PET_CT_URLS,
+    image: PETCTChestThumbnail,
+  },
 ];
 
 export const TOOL_COLORS = [
@@ -171,30 +178,13 @@ export const TOOL_COLORS = [
 
 export const STROKE_WIDTH_ANNOTATION_TOOL_DEFAULT = 1;
 
-export const RULER_LABEL_DEFAULTS = {
-  'Label 1': { color: 'red' },
-};
-
-export const RECTANGLE_LABEL_DEFAULTS = {
-  'Label 1': { color: 'red' },
-};
-
-export const POLYGON_LABEL_DEFAULTS = {
-  'Label 1': { color: 'red' },
-};
-
 export const DEFAULT_PRESET_BY_MODALITY: Record<string, string> = {
   CT: 'CT-AAA',
   MR: 'CT-Coronary-Arteries-2',
   US: 'US-Fetal',
 };
-export const DEFAULT_PRESET = 'CT-AAA';
 
-export const LAYER_PRESET_BY_MODALITY: Record<string, string> = {
-  ...DEFAULT_PRESET_BY_MODALITY,
-  PT: '2hot-opaque',
-};
-export const LAYER_PRESET_DEFAULT = '2hot-opaque';
+export const DEFAULT_PRESET = 'CT-AAA';
 
 // Keyboard shortcuts/hotkeys. Can add modifiers: 'Shift+Ctrl+a'
 export const ACTION_TO_KEY = {
@@ -204,6 +194,7 @@ export const ACTION_TO_KEY = {
   ruler: 'm',
   paint: 'p',
   paintEraser: 'e',
+  paintEyedropper: 'd',
   brushSizeModifier: 'ctrl',
   decreaseBrushSize: '[',
   increaseBrushSize: ']',
@@ -221,21 +212,16 @@ export const ACTION_TO_KEY = {
 
   decrementLabel: 'q',
   incrementLabel: 'w',
+  ...perSegmentShortcut((index) => String((index + 1) % 10)),
+
+  // the main delete key reports Backspace on macOS
+  deleteSelectedAnnotations: ['delete', 'backspace'],
 
   deleteCurrentImage: 'ctrl+.',
   clearScene: 'ctrl+/',
 
   showKeyboardShortcuts: '?',
-} satisfies Record<Action, string>;
-
-export const DEFAULT_SEGMENT_MASKS: SegmentMask[] = [
-  {
-    value: 1,
-    name: 'Segment 1',
-    color: [255, 255, 0, 255],
-    visible: true,
-  },
-];
+} satisfies Record<Action, Binding>;
 
 // from https://github.com/InsightSoftwareConsortium/itk-viewer-color-maps/blob/main/src/CategoricalColors.json
 export const CATEGORICAL_COLORS = [

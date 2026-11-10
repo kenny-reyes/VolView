@@ -22,9 +22,7 @@ import {
 } from '@/src/composables/annotationTool';
 import { getCSSCoordinatesFromEvent } from '@/src/utils/vtk-helpers';
 import { usePolygonStore as useStore } from '@/src/store/tools/polygons';
-import vtkWidgetFactory, {
-  vtkPolygonViewWidget as WidgetView,
-} from '@/src/vtk/PolygonWidget';
+import vtkWidgetFactory from '@/src/vtk/PolygonWidget';
 import { Maybe } from '@/src/types';
 import type { Vector3 } from '@kitware/vtk.js/types';
 import { ToolID } from '@/src/types/annotation-tool';
@@ -36,7 +34,7 @@ import SVG2DComponent from './PolygonSVG2D.vue';
 
 export default defineComponent({
   name: 'PolygonWidget2D',
-  emits: ['placed', 'contextmenu', 'widgetHover'],
+  emits: ['placing', 'placed', 'contextmenu', 'widgetHover'],
   props: {
     toolId: {
       type: String as unknown as PropType<ToolID>,
@@ -76,7 +74,7 @@ export default defineComponent({
     const widgetFactory = vtkWidgetFactory.newInstance({
       id: toolId.value,
     });
-    const widget = view.widgetManager.addWidget(widgetFactory) as WidgetView;
+    const widget = view.widgetManager.addWidget(widgetFactory)!;
 
     onUnmounted(() => {
       view.widgetManager.removeWidget(widget);
@@ -90,6 +88,12 @@ export default defineComponent({
         widget.resetInteractions();
         widget.getWidgetState().clearHandles();
       }
+    });
+
+    // Fires on every handle dropped into the polygon being placed; only the
+    // first has a segment to resolve.
+    onVTKEvent(widget, 'onStartInteractionEvent', () => {
+      if (isPlacing.value) emit('placing');
     });
 
     onVTKEvent(widget, 'onPlacedEvent', () => {
@@ -135,6 +139,7 @@ export default defineComponent({
 
     const manipulator = vtkPlaneManipulator.newInstance();
     widget.setManipulator(manipulator);
+    onUnmounted(() => manipulator.delete());
 
     watchEffect(() => {
       updatePlaneManipulatorFor2DView(
@@ -166,6 +171,7 @@ export default defineComponent({
     return {
       slice,
       tool,
+      appearance: computed(() => toolStore.appearanceOfTool(toolId.value)),
       editState,
       showHandles,
     };
@@ -177,8 +183,8 @@ export default defineComponent({
   <SVG2DComponent
     v-show="slice === tool.slice"
     :points="tool.points"
-    :color="tool.color"
-    :stroke-width="tool.strokeWidth"
+    :color="appearance.cssColor"
+    :stroke-width="appearance.strokeWidth"
     :move-point="editState.movePoint"
     :placing="tool.placing"
     :finishable="editState.finishable"

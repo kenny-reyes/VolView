@@ -4,8 +4,9 @@ import * as zlib from 'node:zlib';
 import JSZip from 'jszip';
 import { volViewPage } from '../pageobjects/volview.page';
 import { TEMP_DIR } from '../../wdio.shared.conf';
-import { waitForFileExists } from './utils';
-import { ONE_CT_SLICE_DICOM, openConfigAndDataset } from './configTestUtils';
+import { waitForDownload } from './utils';
+import { openConfigAndDataset } from './configTestUtils';
+import { ONE_CT_SLICE_DICOM } from '../datasets';
 
 /**
  * Parse NRRD header key-value pairs from a buffer (handles gzip).
@@ -41,46 +42,17 @@ describe('Slicer-compatible seg.nrrd export', function () {
     const config = { io: { segmentGroupSaveFormat: 'seg.nrrd' } };
     await openConfigAndDataset(config, 'seg-nrrd-export', ONE_CT_SLICE_DICOM);
 
-    // Activate paint tool — creates a segment group
     await volViewPage.activatePaint();
 
     // Paint a stroke so the labelmap has data
     const views2D = await volViewPage.getViews2D();
-    const canvas = await views2D[0].$('canvas');
-    const location = await canvas.getLocation();
-    const size = await canvas.getSize();
-    const cx = Math.round(location.x + size.width / 2);
-    const cy = Math.round(location.y + size.height / 2);
-
-    await browser
-      .action('pointer')
-      .move({ x: cx, y: cy })
-      .down()
-      .move({ x: cx + 20, y: cy })
-      .up()
-      .perform();
+    await volViewPage.paintStrokeOnView(views2D[0]);
 
     // Save session — downloads a .volview.zip containing the seg.nrrd
     const sessionFileName = await volViewPage.saveSession();
     const downloadedPath = path.join(TEMP_DIR, sessionFileName);
 
-    await waitForFileExists(downloadedPath, 30_000);
-
-    // Wait for file to be fully written
-    await browser.waitUntil(
-      () => {
-        try {
-          return fs.statSync(downloadedPath).size > 0;
-        } catch {
-          return false;
-        }
-      },
-      {
-        timeout: 10_000,
-        interval: 500,
-        timeoutMsg: 'Downloaded session zip remained 0 bytes',
-      }
-    );
+    await waitForDownload(downloadedPath, 30_000);
 
     // Extract the seg.nrrd file from the session zip
     const zipData = fs.readFileSync(downloadedPath);

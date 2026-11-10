@@ -6,25 +6,22 @@ import type {
   SubmittedJobParameterDisplay,
 } from '@/src/processing/types';
 import { plural } from '@/src/utils';
-import { fieldLabel, type TaskFormModel } from './formModel';
-import type { BoundSourceRefType } from './sourceRefs';
+import {
+  fieldLabel,
+  type TaskFormModel,
+} from '@/src/processing/engine/formModel';
+import type { BoundSourceRefType } from '@/src/processing/engine/sourceRefs';
 
 // Everything the display strings are made of, resolved by the caller in one
 // synchronous pass so formatting stays pure.
 export type JobDisplayContext = {
-  // Parameter id → display names of the segment groups bound to it.
-  labelmapNames: Record<string, string[]>;
+  // Parameter id → display name of the segmentation bound to it.
+  labelmapNames: Record<string, string>;
   types: Record<string, BoundSourceRefType>;
   imageName: string | undefined;
+  imageNames: Record<string, string>;
   annotationCount: number;
 };
-
-// A parameter carries groups only when its resolution resolved, and a resolved
-// resolution always names at least one group.
-const boundLabelmapName = (
-  ctx: JobDisplayContext,
-  parameterId: string
-): string | undefined => ctx.labelmapNames[parameterId]?.join(', ');
 
 // The bound value is a whole set of tools rather than one named resource, so
 // the count is the identifying part.
@@ -38,9 +35,9 @@ const boundSourceRefName = (
   parameterId: string
 ): string | undefined => {
   const type = ctx.types[parameterId];
-  if (type === TYPE_TAG_LABELMAP) return boundLabelmapName(ctx, parameterId);
+  if (type === TYPE_TAG_LABELMAP) return ctx.labelmapNames[parameterId];
   if (type === TYPE_TAG_ANNOTATIONS) return boundAnnotationsName(ctx);
-  return ctx.imageName;
+  return ctx.imageNames[parameterId];
 };
 
 export const buildSourceRefNames = (
@@ -62,13 +59,7 @@ export const formatProcessingValue = (
   value: ProcessingValue
 ): string => {
   if (field.kind === 'sourceRef') {
-    // A bound labelmap param always names its groups, so the fallback is the
-    // optional param that bound nothing.
-    const fallback =
-      ctx.types[field.id] === TYPE_TAG_LABELMAP
-        ? 'not provided'
-        : 'active dataset';
-    return boundSourceRefName(ctx, field.id) ?? fallback;
+    return boundSourceRefName(ctx, field.id) ?? 'not provided';
   }
   if (field.kind === 'bounds') {
     return Array.isArray(value) && value.length > 0

@@ -1,3 +1,4 @@
+import { DEFAULT_LAYER_PRESET } from '@/src/vtk/LayerColorPresets';
 import JSZip from 'jszip';
 import { z } from 'zod';
 import type { Vector3 } from '@kitware/vtk.js/types';
@@ -20,11 +21,12 @@ import type {
   SliceConfig,
   WindowLevelConfig,
   LayersConfig,
-  SegmentGroupConfig,
+  LayerDisplayConfig,
   VolumeColorConfig,
   CinePlaybackViewConfig,
 } from '@/src/store/view-configs/types';
 import type { LPSAxis } from '@/src/types/lps';
+import type { Segment as SegmentModel } from '@/src/segmentation/segment';
 import type {
   ColorBy,
   ColorTransferFunction,
@@ -32,7 +34,6 @@ import type {
   OpacityGaussians,
   OpacityPoints,
   OpacityNodes,
-  ColoringConfig,
   CVRConfig,
   BlendConfig,
 } from '@/src/types/views';
@@ -42,6 +43,7 @@ import {
   type LayoutDirection,
   type LayoutItem,
 } from '@/src/types/layout';
+import { DEFAULT_SEGMENTATION_DISPLAY } from '@/src/segmentation/model';
 
 const FileSource = z.object({
   id: z.number(),
@@ -136,8 +138,11 @@ const Vector3 = z.tuple([
 ]) satisfies z.ZodType<Vector3>;
 
 type AutoRangeKeys = keyof typeof WLAutoRanges;
+
 const WindowLevelConfig = z
   .object({
+    preset: z.string().default('Grayscale'),
+    visibility: z.boolean().default(true),
     width: z.number().optional(),
     level: z.number().optional(),
     auto: z.string() as z.ZodType<AutoRangeKeys>,
@@ -168,6 +173,7 @@ const SliceConfig = z.object({
 }) satisfies z.ZodType<SliceConfig>;
 
 const CameraConfig = z.object({
+  autoFit: z.boolean().optional(),
   parallelScale: z.number().optional(),
   position: Vector3.optional(),
   focalPoint: Vector3.optional(),
@@ -227,12 +233,6 @@ const ColorTransferFunction = z.object({
   mappingRange: z.tuple([z.number(), z.number()]),
 }) satisfies z.ZodType<ColorTransferFunction>;
 
-const ColoringConfig = z.object({
-  colorBy: ColorBy,
-  transferFunction: ColorTransferFunction,
-  opacityFunction: OpacityFunction,
-}) satisfies z.ZodType<ColoringConfig>;
-
 const CVRConfig = z.object({
   enabled: z.boolean(),
   lightFollowsCamera: z.boolean(),
@@ -259,17 +259,22 @@ const BlendConfig = z.object({
   visibility: z.boolean(),
 }) satisfies z.ZodType<BlendConfig>;
 
+const LayerColorTransferFunction = ColorTransferFunction.extend({
+  preset: z.string().default(DEFAULT_LAYER_PRESET),
+});
+
 const LayersConfig = z.object({
-  colorBy: ColorBy,
-  transferFunction: ColorTransferFunction,
+  transferFunction: LayerColorTransferFunction,
   opacityFunction: OpacityFunction,
   blendConfig: BlendConfig,
+  transparentBackground: z.boolean().default(true),
 }) satisfies z.ZodType<LayersConfig>;
 
-const SegmentGroupConfig = z.object({
-  outlineOpacity: z.number(),
-  outlineThickness: z.number(),
-}) satisfies z.ZodType<SegmentGroupConfig>;
+const LayerDisplayConfig = LayerColorTransferFunction.extend({
+  opacity: z.number(),
+  visibility: z.boolean().default(true),
+  transparentBackground: z.boolean().default(true),
+}) satisfies z.ZodType<LayerDisplayConfig>;
 
 const CinePlaybackViewConfig = z.object({
   frame: z.number(),
@@ -279,7 +284,6 @@ const ViewConfig = z.object({
   window: WindowLevelConfig.optional(),
   slice: SliceConfig.optional(),
   layers: LayersConfig.optional(),
-  segmentGroup: SegmentGroupConfig.optional(),
   camera: CameraConfig.optional(),
   volumeColorConfig: VolumeColorConfig.optional(),
   cinePlayback: CinePlaybackViewConfig.optional(),
@@ -300,49 +304,114 @@ export type View = z.infer<typeof View>;
 
 const RGBAColor = z.tuple([z.number(), z.number(), z.number(), z.number()]);
 
-const SegmentMask = z.object({
-  value: z.number(),
-  name: z.string(),
-  color: RGBAColor,
-  visible: z.boolean().default(true),
-  locked: z.boolean().optional(),
-});
-
 // Provenance of a scene object produced by a processing job. This durable
 // identity prevents a restored result from being applied twice. Optional and
 // additive wherever it is used; hand-made state has none. The shape mirrors the
-// backend contract's result source and is shared by groups and annotation tools.
+// backend contract's result source and is shared by mask bindings, artifacts
+// and annotation tools.
 export const ProcessingResultSource = z.object({
   providerId: z.string(),
   jobId: z.string(),
   outputId: z.string(),
 });
 
-export const SegmentGroupMetadata = z.object({
-  name: z.string(),
-  // The explicit parent binding stays REQUIRED: a segment group entry without
-  // a parent must not exist at all (the backend composes a parentless
-  // labelmap as an ordinary image dataset,
-  // never as a segment group). Segment descriptors are OPTIONAL: when absent,
-  // restore enumerates the labelmap's non-background voxel values and applies
-  // the same default names/colors (and embedded .seg.nrrd metadata overlay)
-  // that live convertImageToLabelmap uses.
-  parentImage: z.string(),
-  segments: z
-    .object({
-      order: z.number().array(),
-      byValue: z.record(z.string(), SegmentMask),
-    })
-    .optional(),
+const Extent3D = z.tuple([
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number(),
+]);
+
+const LabelmapBinding = z.object({
+  extent: Extent3D,
+  path: z.string(),
+  name: z.string().optional(),
   source: ProcessingResultSource.optional(),
 });
 
-export const SegmentGroup = z
+// Only incoming manifests can refer to an unsplit labelmap. Normal saved
+// masks always own an archive entry.
+const ImportedLabelmapBinding = LabelmapBinding.extend({
+  path: z.string().optional(),
+  artifactId: z.string().optional(),
+  sourceValue: z.number().optional(),
+}).refine(
+  (binding) =>
+    (binding.path === undefined) !== (binding.artifactId === undefined),
+  { message: 'A labelmap binding names either a path or an artifact' }
+);
+
+// Everything the user sees or sets lives on the segment; a record is one
+// image's mask for it.
+const SegmentMask = z.object({
+  id: z.string(),
+  segmentId: z.string(),
+  representations: z.object({ labelmap: LabelmapBinding.optional() }),
+});
+
+// Serialized in order, unused segments included: the picker lists them and
+// export precedence follows that order, and restore re-mints ids in it.
+export const Segment = z.object({
+  id: z.string(),
+  name: z.string(),
+  color: RGBAColor,
+  visible: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  fillOpacity: z.number().optional(),
+  outlineOpacity: z.number().optional(),
+  strokeWidth: z.number().optional(),
+}) satisfies z.ZodType<SegmentModel>;
+
+export const Segmentation = z.object({
+  id: z.string(),
+  name: z.string(),
+  parentImage: z.string(),
+  masks: SegmentMask.array(),
+  order: z.string().array(),
+  fillOpacity: z.number().default(DEFAULT_SEGMENTATION_DISPLAY.fillOpacity),
+  outlineOpacity: z
+    .number()
+    .default(DEFAULT_SEGMENTATION_DISPLAY.outlineOpacity),
+  outlineThickness: z
+    .number()
+    .default(DEFAULT_SEGMENTATION_DISPLAY.outlineThickness),
+});
+
+const ImportedSegmentation = Segmentation.extend({
+  masks: SegmentMask.extend({
+    representations: z.object({
+      labelmap: ImportedLabelmapBinding.optional(),
+    }),
+  }).array(),
+});
+
+export type Segmentation = z.infer<typeof Segmentation>;
+
+/**
+ * A whole-volume labelmap that no mask holds yet: restore divides it into one
+ * bounded mask per segment. Two producers write these and no save does, since
+ * a mask that exists carries its own voxels. A 6.4.0 migration emits one per
+ * legacy segment group, and a backend composes one to hand VolView a labelmap
+ * to attach, wired to its bytes through `dataSourceId`.
+ */
+export const SegmentationArtifact = z
   .object({
     id: z.string(),
+    parentImage: z.string(),
+    name: z.string(),
     path: z.string().optional(),
     dataSourceId: z.number().optional(),
-    metadata: SegmentGroupMetadata,
+    source: ProcessingResultSource.optional(),
+    // Migration-only: the legacy active paint value, reactivated once decoding
+    // an artifact no mask names has created the segments it names.
+    pendingActiveValue: z.number().optional(),
+    // Also migration-only: display state applied after an artifact has been
+    // decoded into segments, which is where it lands once they exist.
+    pendingFillOpacity: z.number().optional(),
+    pendingOutlineOpacity: z.number().optional(),
+    pendingVisibility: z.boolean().optional(),
   })
   .refine(
     (data) => data.path !== undefined || data.dataSourceId !== undefined,
@@ -351,7 +420,7 @@ export const SegmentGroup = z
     }
   );
 
-export type SegmentGroup = z.infer<typeof SegmentGroup>;
+export type SegmentationArtifact = z.infer<typeof SegmentationArtifact>;
 
 const LPSAxis = z.union([
   z.literal('Axial'),
@@ -371,10 +440,7 @@ const annotationTool = z.object({
   frame: z.number().optional(),
   id: z.string().optional() as unknown as z.ZodType<ToolID | undefined>,
   name: z.string().optional(),
-  color: z.string().optional(),
-  strokeWidth: z.number().optional(),
-  label: z.string().optional(),
-  labelName: z.string().optional(),
+  segmentId: z.string().optional(),
   metadata: z.record(z.string(), z.string()).optional(),
   // Job provenance, present only on a tool applied from a result. Unknown keys
   // are stripped on parse, so restore would silently drop the idempotency key
@@ -382,10 +448,11 @@ const annotationTool = z.object({
   source: ProcessingResultSource.optional(),
 });
 
+// Every shape names a segment in its registry; the registries themselves are
+// manifest roots, so a tool entry carries geometry only.
 const makeToolEntry = <T extends z.ZodRawShape>(tool: z.ZodObject<T>) =>
   z.object({
     tools: z.array(tool),
-    labels: z.record(z.string(), tool.partial()),
   });
 
 const Ruler = annotationTool.extend({
@@ -410,11 +477,8 @@ const Polygons = makeToolEntry(Polygon);
 const ToolsEnumNative = z.nativeEnum(ToolsEnum);
 
 const Paint = z.object({
-  activeSegmentGroupID: z.string().nullable().optional(),
-  activeSegment: z.number().nullish(),
   brushSize: z.number().optional(),
   crossPlaneSync: z.boolean().optional(),
-  labelmapOpacity: z.number().optional(),
 });
 
 const LPSCroppingPlanes = z.object({
@@ -450,7 +514,10 @@ export const ManifestSchema = z.object({
   datasets: Dataset.array().optional(),
   dataSources: DataSource.array(),
   datasetFilePath: z.record(z.string(), z.string()).optional(),
-  segmentGroups: SegmentGroup.array().optional(),
+  segmentations: ImportedSegmentation.array().optional(),
+  segmentationArtifacts: SegmentationArtifact.array().optional(),
+  segments: Segment.array().optional(),
+  selectedSegment: z.string().optional(),
   tools: Tools.optional(),
   activeView: z.string().optional().nullable(),
   isActiveViewMaximized: z.boolean().optional(),
@@ -459,6 +526,7 @@ export const ManifestSchema = z.object({
   layout: Layout.optional(),
   layoutSlots: z.array(z.string()).optional(),
   parentToLayers: ParentToLayers.optional(),
+  layerDisplay: z.record(z.string(), LayerDisplayConfig).optional(),
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;

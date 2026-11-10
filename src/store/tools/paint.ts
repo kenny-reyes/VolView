@@ -1,41 +1,38 @@
+import { useSegmentationEditsStore } from '@/src/segmentation/editing/coordinator';
 import type { Vector2, Vector3 } from '@kitware/vtk.js/types';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import type { Manifest, StateFile } from '@/src/io/state-file/schema';
 import type { Maybe } from '@/src/types';
 import { useImageStatsStore } from '@/src/store/image-stats';
-import { computed, ref, unref, watch } from 'vue';
+import { SEGMENT_VALUE } from '@/src/segmentation/masks/labelValue';
+import { computed, ref, unref, watch, watchEffect } from 'vue';
 import { watchImmediate } from '@vueuse/core';
 import { vec3 } from 'gl-matrix';
+import type vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import { defineStore } from 'pinia';
 import { PaintMode } from '@/src/core/tools/paint';
 import { computeEffectiveView } from '@/src/core/views/effectiveView';
 import { worldPointToIndex } from '@/src/utils/imageSpace';
+import {
+  clipExtent,
+  fullExtent,
+  isEmptyExtent,
+} from '@/src/segmentation/geometry';
 import { Tools } from './types';
-import { useSegmentGroupStore } from '../segmentGroups';
+import { useSegmentStore } from '@/src/segmentation/segments';
+import { useSegmentationStore } from '@/src/segmentation/store';
 import useViewSliceStore from '../view-configs/slicing';
 import { useViewStore } from '../views';
 import { useViewCameraStore } from '../view-configs/camera';
 import { useImageCacheStore } from '../image-cache';
-import { declareManifestRefs } from '@/src/core/manifestRefs';
-import { isRecord } from '@/src/utils';
-
-// The manifest reference this store's sync orphan-watch keeps clean (see the
-// activeSegmentGroupID watch below), declared for the dev-only save backstop.
-declareManifestRefs('tools.paint', (manifest) => {
-  const tools = isRecord(manifest.tools) ? manifest.tools : {};
-  const paint = isRecord(tools.paint) ? tools.paint : {};
-  return typeof paint.activeSegmentGroupID === 'string'
-    ? [
-        {
-          kind: 'segmentGroup' as const,
-          id: paint.activeSegmentGroupID,
-          where: 'tools.paint.activeSegmentGroupID',
-        },
-      ]
-    : [];
-});
 
 const DEFAULT_BRUSH_SIZE = 4;
+const getBrushSizeLimit = (dimensions: Iterable<number>) =>
+  Math.max(1, Math.ceil(Math.max(...dimensions) / 10));
+
+// Growing a mask copies the whole of it, so a stroke that has to grow it asks
+// for room beyond its footprint and the samples that follow grow nothing.
+const STROKE_GROWTH_PADDING = 16;
 const DEFAULT_THRESHOLD_RANGE: Vector2 = [
   Number.NEGATIVE_INFINITY,
   Number.POSITIVE_INFINITY,
@@ -47,8 +44,6 @@ export const usePaintToolStore = defineStore('paint', () => {
   const activeMode = ref(PaintMode.CirclePaint);
   const modeBeforeProcess = ref(PaintMode.CirclePaint);
   const processControlsOpen = ref(false);
-  const activeSegmentGroupID = ref<Maybe<string>>(null);
-  const activeSegment = ref<Maybe<number>>(null);
   const brushSize = ref(DEFAULT_BRUSH_SIZE);
   const strokePoints = ref<vec3[]>([]);
   const isActive = ref(false);
@@ -56,40 +51,38 @@ export const usePaintToolStore = defineStore('paint', () => {
   const crossPlaneSync = ref(false);
   const paintPosition = ref<Vector3>([0, 0, 0]);
   const activePaintViewID = ref<Maybe<string>>(null);
-  const lastSegmentByGroup = ref<Record<string, number>>({});
+  // Masks strokes wrote or cleared, checked for emptiness when a stroke ends
+  // rather than per sample. A stroke that never ended leaves them to the next.
+  const strokeMaskIds = new Set<string>();
 
-  const { currentImageID, currentImageMetadata } = useCurrentImage('global');
+  const { currentImageID, currentImageData, currentImageMetadata } =
+    useCurrentImage('global');
   const imageStatsStore = useImageStatsStore();
   const viewSliceStore = useViewSliceStore();
   const viewStore = useViewStore();
   const viewCameraStore = useViewCameraStore();
 
+  const brushSizeMax = computed(() =>
+    getBrushSizeLimit(currentImageMetadata.value.dimensions)
+  );
+
+  watchEffect(() => {
+    if (currentImageData.value && brushSize.value > brushSizeMax.value) {
+      brushSize.value = brushSizeMax.value;
+    }
+  });
+
   function getWidgetFactory(this: _This) {
     return this.$paint.factory;
   }
 
-  const segmentGroupStore = useSegmentGroupStore();
-
-  // Delete-base cleanup: removing a dataset cascades away its segment groups.
-  // `serialize` writes the raw `activeSegmentGroupID`, so null it the instant
-  // its record leaves the store or the save manifest carries an orphaned id.
-  // Sync flush keeps this within the same `datasetStore.remove` call — the same
-  // remove-cascade contract as onImageDeleted, but keyed on segmentGroupID (not
-  // imageID), so it watches the record set instead of using that composable.
-  watch(
-    () =>
-      activeSegmentGroupID.value != null &&
-      !(activeSegmentGroupID.value in segmentGroupStore.metadataByID),
-    (orphaned) => {
-      if (orphaned) activeSegmentGroupID.value = null;
-    },
-    { flush: 'sync' }
-  );
+  const segmentationStore = useSegmentationStore();
 
   const isPaintingModeActive = computed(
     () =>
       activeMode.value === PaintMode.CirclePaint ||
-      activeMode.value === PaintMode.Erase
+      activeMode.value === PaintMode.Erase ||
+      activeMode.value === PaintMode.Eyedropper
   );
   const activePaintMode = computed(() =>
     isPaintingModeActive.value ? activeMode.value : modeBeforeProcess.value
@@ -141,71 +134,27 @@ export const usePaintToolStore = defineStore('paint', () => {
   }
 
   /**
-   * Sets the active labelmap.
+   * The mask this stroke writes into. It is allocated for a stroke that
+   * writes voxels; an erase takes what is already there, so it resolves nothing
+   * into existence and refuses when there is nothing stored to take from.
    */
-  function setActiveSegmentGroup(segmentGroupID: Maybe<string>) {
-    activeSegmentGroupID.value = segmentGroupID;
-  }
+  function resolveStrokeTarget(imageID: string, allocate: boolean) {
+    if (![PaintMode.CirclePaint, PaintMode.Erase].includes(activeMode.value))
+      return undefined;
+    const maskId = allocate
+      ? segmentationStore.resolveEditTarget(imageID)
+      : segmentationStore.findEditTarget(imageID);
+    if (!maskId) return undefined;
 
-  function getValidSegmentGroupID(imageID: Maybe<string>): Maybe<string> {
-    if (!imageID) return null;
+    const binding = allocate
+      ? segmentationStore.ensureLabelmapBinding(maskId)
+      : segmentationStore.findMaskBinding(maskId);
+    if (!binding) return undefined;
 
-    // If current segment group belongs to this image, keep using it
-    if (
-      activeSegmentGroupID.value &&
-      segmentGroupStore.metadataByID[activeSegmentGroupID.value]
-        ?.parentImage === imageID
-    ) {
-      return activeSegmentGroupID.value;
-    }
-
-    // Otherwise look for other segment groups for this image
-    const segmentGroups = segmentGroupStore.orderByParent[imageID];
-    if (segmentGroups && segmentGroups.length > 0) {
-      return segmentGroups[0];
-    }
-    return null;
-  }
-
-  /**
-   * Sets the active labelmap from a given image.
-   *
-   * If a labelmap exists, pick one. If no labelmap exists, create one.
-   */
-  function ensureActiveSegmentGroupForImage(imageID: Maybe<string>) {
-    if (!imageID) {
-      setActiveSegmentGroup(null);
-      return;
-    }
-
-    const segmentGroupID =
-      getValidSegmentGroupID(imageID) ??
-      segmentGroupStore.newLabelmapFromImage(imageID);
-    setActiveSegmentGroup(segmentGroupID);
-  }
-
-  /**
-   * Sets the active segment.
-   *
-   * If the segment may be null | undefined, indicating no paint will occur.
-   * @param segValue
-   */
-  function setActiveSegment(this: _This, segValue: Maybe<number>) {
-    if (segValue) {
-      if (!activeSegmentGroupID.value)
-        throw new Error('Cannot set active segment without a labelmap');
-
-      const { segments } =
-        segmentGroupStore.metadataByID[activeSegmentGroupID.value];
-
-      if (!(segValue in segments.byValue))
-        throw new Error('Segment is not available for the active labelmap');
-
-      lastSegmentByGroup.value[activeSegmentGroupID.value] = segValue;
-    }
-
-    activeSegment.value = segValue;
-    this.$paint.setBrushValue(segValue);
+    return {
+      maskId,
+      voxels: segmentationStore.maskVoxels(maskId),
+    };
   }
 
   /**
@@ -214,73 +163,136 @@ export const usePaintToolStore = defineStore('paint', () => {
    * @param size
    */
   function setBrushSize(this: _This, size: number) {
-    brushSize.value = Math.round(size);
-    this.$paint.setBrushSize(size);
+    const max = currentImageData.value
+      ? brushSizeMax.value
+      : Number.POSITIVE_INFINITY;
+    const nextSize = Math.max(1, Math.min(max, Math.round(size)));
+    // Preserve the hovered image's cap; inactive tools still initialize the stencil.
+    if (isActive.value && nextSize === brushSize.value) return;
+    brushSize.value = nextSize;
+    this.$paint.setBrushSize(nextSize);
+  }
+
+  function selectSegmentAt(worldPoint: vec3, imageID: string) {
+    const parent = useImageCacheStore().getVtkImageData(imageID);
+    if (!parent) return;
+    // Masks share the parent grid, so one parent index addresses every mask.
+    const [i, j, k] = [...worldPointToIndex(parent, worldPoint)].map(
+      Math.round
+    );
+    const registry = useSegmentStore().segments;
+    // The eyedropper takes the first visible segment covering the point,
+    // including locked segments.
+    const hit = segmentationStore
+      .segmentsAt(imageID, i, j, k)
+      .find((segmentId) => registry.appearanceOf(segmentId).visible);
+    if (hit) registry.selectSegment(hit);
+  }
+
+  /**
+   * The latest step of the stroke and the parent voxels it can touch, or
+   * nothing when it touches none.
+   */
+  function latestStrokeStep(
+    this: _This,
+    axisIndex: 0 | 1 | 2,
+    parentImage: vtkImageData
+  ) {
+    const lastIndex = strokePoints.value.length - 1;
+    if (lastIndex < 0) return undefined;
+
+    // The stroke is stated in PARENT index space: a bounded mask's own origin
+    // moves as it grows, so its indices are not a fixed frame to state it in.
+    const lastIndexPoint = worldPointToIndex(
+      parentImage,
+      strokePoints.value[lastIndex]
+    );
+    const prevIndexPoint =
+      lastIndex >= 1
+        ? worldPointToIndex(parentImage, strokePoints.value[lastIndex - 1])
+        : undefined;
+
+    const strokeExtent = clipExtent(
+      this.$paint.strokeBounds(axisIndex, lastIndexPoint, prevIndexPoint),
+      fullExtent(parentImage.getDimensions())
+    );
+    // A press beside the image covers no voxel, so it must mint nothing.
+    if (isEmptyExtent(strokeExtent)) return undefined;
+    return { lastIndexPoint, prevIndexPoint, strokeExtent };
   }
 
   function doPaintStroke(this: _This, axisIndex: 0 | 1 | 2, imageID: string) {
-    const segmentGroupID = getValidSegmentGroupID(imageID);
-    if (!segmentGroupID) return;
+    // Asked before anything else: cancelling a preview and resolving the target
+    // (which mints the mask and its segmentation) are both side effects a
+    // refused stroke must not have.
+    if (segmentationStore.editTargetLocked()) return;
 
-    const labelmap = segmentGroupStore.dataIndex[segmentGroupID];
-    if (!labelmap) return;
+    const parentImage = useImageCacheStore().getVtkImageData(imageID);
+    if (!parentImage) return;
+    const step = latestStrokeStep.call(this, axisIndex, parentImage);
+    if (!step) return;
+    const { lastIndexPoint, prevIndexPoint, strokeExtent } = step;
 
-    // Prevent painting if active segment is locked or doesn't exist
-    if (activeSegment.value) {
-      const metadata = segmentGroupStore.metadataByID[segmentGroupID];
-      if (!metadata) return;
+    useSegmentationEditsStore().beforeEdit();
+    const erasing = activeMode.value === PaintMode.Erase;
+    const target = resolveStrokeTarget(imageID, !erasing);
+    if (!target) return;
 
-      const segment = metadata.segments.byValue[activeSegment.value];
-      if (!segment || segment.locked) {
-        return;
-      }
-    }
-
-    const imageData = useImageCacheStore().getVtkImageData(imageID);
-    const underlyingImagePixels = imageData
-      ?.getPointData()
+    const { voxels, maskId } = target;
+    const underlyingImagePixels = parentImage
+      .getPointData()
       .getScalars()
       .getData();
+
+    // Growth happens first, and nothing grows once the buffers below are read.
+    if (!erasing) {
+      voxels.ensureContains(strokeExtent, STROKE_GROWTH_PADDING);
+    }
+
+    const { extent } = voxels.binding()!;
+    if (isEmptyExtent(extent)) return;
+
+    // Resolved once per stroke: the claim below is made for every voxel the
+    // brush touches. A stroke is aimed at a place, so it takes the voxel from
+    // an unlocked neighbor.
+    const claimVoxel = erasing
+      ? undefined
+      : segmentationStore.voxelClaim(maskId, 'aimed', strokeExtent);
+    const parentDimensions = parentImage.getDimensions();
+    const rowStride = parentDimensions[0];
+    const sliceStride = parentDimensions[0] * parentDimensions[1];
+    const maskData = voxels.scalars();
     const [minThreshold, maxThreshold] = thresholdRange.value;
-    const shouldPaint = (idx: number) => {
-      if (!underlyingImagePixels) return false;
 
-      // Prevent painting over locked segments
-      const metadata = segmentGroupStore.metadataByID[segmentGroupID];
-      if (metadata) {
-        const currentData = labelmap
-          .getPointData()
-          .getScalars()
-          .getData() as Uint8Array;
-        const currentValue = currentData[idx];
-        const segment = metadata.segments.byValue[currentValue];
-        if (segment?.locked) {
-          return false;
-        }
-      }
+    // The brush walks the PARENT grid and hands its points back in it, so the
+    // parent pixel under a voxel is a plain offset. Read a component at a
+    // time: the callback below runs for every voxel the brush touches, and a
+    // triple per voxel is an allocation per voxel.
+    const parentOffset = (point: number[]) =>
+      point[0] + point[1] * rowStride + point[2] * sliceStride;
 
-      const pixValue = underlyingImagePixels[idx];
-      return minThreshold <= pixValue && pixValue <= maxThreshold;
+    const shouldPaint = (offset: number, point: number[]) => {
+      // Erase clears the active segment only.
+      if (erasing && maskData[offset] !== SEGMENT_VALUE) return false;
+
+      const pixValue = underlyingImagePixels[parentOffset(point)];
+      if (!(minThreshold <= pixValue && pixValue <= maxThreshold)) return false;
+
+      // Asked last: the claim clears the voxel from neighbors, so it runs
+      // only for a voxel that is about to be written.
+      return claimVoxel?.claim(point[0], point[1], point[2]) ?? true;
     };
 
-    const lastIndex = strokePoints.value.length - 1;
-    if (lastIndex >= 0) {
-      const lastWorldPoint = strokePoints.value[lastIndex];
-      const prevWorldPoint =
-        lastIndex >= 1 ? strokePoints.value[lastIndex - 1] : undefined;
-
-      const lastIndexPoint = worldPointToIndex(labelmap, lastWorldPoint);
-      const prevIndexPoint = prevWorldPoint
-        ? worldPointToIndex(labelmap, prevWorldPoint)
-        : undefined;
-
-      this.$paint.paintLabelmap(
-        labelmap,
-        axisIndex,
-        lastIndexPoint,
-        prevIndexPoint,
-        shouldPaint
-      );
+    try {
+      this.$paint.paintLabelmap(voxels.image(), axisIndex, lastIndexPoint, {
+        endPoint: prevIndexPoint,
+        // Where this mask's buffer sits on the parent grid the points are in.
+        origin: [extent[0], extent[2], extent[4]],
+        shouldPaint,
+      });
+    } finally {
+      strokeMaskIds.add(maskId);
+      claimVoxel?.finish().forEach((cleared) => strokeMaskIds.add(cleared));
     }
   }
 
@@ -288,39 +300,20 @@ export const usePaintToolStore = defineStore('paint', () => {
     const imageData = useImageCacheStore().getVtkImageData(imageID);
     if (!imageData) return;
 
-    const spacing = [...imageData.getSpacing()];
+    const spacing = imageData.getSpacing().map(Math.abs);
+    // One size unit follows the same voxel spacing in every slice plane.
+    const finestSpacing = Math.min(...spacing);
     spacing.splice(axisIndex, 1);
-    const scale: Vector2 = [1 / spacing[0], 1 / spacing[1]];
+    const scale: Vector2 = [
+      finestSpacing / spacing[0],
+      finestSpacing / spacing[1],
+    ];
+    const max = getBrushSizeLimit(imageData.getDimensions());
+    if (imageID === currentImageID.value && this.brushSize > max) {
+      this.setBrushSize(max);
+    }
+    this.$paint.setBrushSize(Math.min(this.brushSize, max));
     this.$paint.setBrushScale(scale);
-  }
-
-  function switchToSegmentGroupForImage(this: _This, imageID: string) {
-    const segmentGroupID =
-      getValidSegmentGroupID(imageID) ??
-      segmentGroupStore.newLabelmapFromImage(imageID);
-
-    if (!segmentGroupID) {
-      throw new Error(
-        `Failed to create or find segment group for image ${imageID}`
-      );
-    }
-
-    if (activeSegmentGroupID.value === segmentGroupID) return;
-
-    setActiveSegmentGroup(segmentGroupID);
-
-    const metadata = segmentGroupStore.metadataByID[segmentGroupID];
-    if (!metadata) return;
-
-    const lastSegment = lastSegmentByGroup.value[segmentGroupID];
-    if (lastSegment !== undefined && lastSegment in metadata.segments.byValue) {
-      setActiveSegment.call(this, lastSegment);
-      return;
-    }
-
-    if (metadata.segments.order.length > 0) {
-      setActiveSegment.call(this, metadata.segments.order[0]);
-    }
   }
 
   function startStroke(
@@ -329,7 +322,6 @@ export const usePaintToolStore = defineStore('paint', () => {
     axisIndex: 0 | 1 | 2,
     imageID: string
   ) {
-    switchToSegmentGroupForImage.call(this, imageID);
     strokePoints.value = [vec3.clone(worldPoint)];
     doPaintStroke.call(this, axisIndex, imageID);
   }
@@ -351,7 +343,13 @@ export const usePaintToolStore = defineStore('paint', () => {
     imageID: string
   ) {
     strokePoints.value.push(worldPoint);
-    doPaintStroke.call(this, axisIndex, imageID);
+    try {
+      doPaintStroke.call(this, axisIndex, imageID);
+    } finally {
+      const touched = [...strokeMaskIds];
+      strokeMaskIds.clear();
+      segmentationStore.deleteEmptyMasks(touched);
+    }
   }
 
   const currentImageStats = computed(() => {
@@ -377,12 +375,14 @@ export const usePaintToolStore = defineStore('paint', () => {
   // --- setup and teardown --- //
 
   function activateTool(this: _This) {
-    const imageID = currentImageID.value;
-    if (!imageID) {
+    if (!currentImageID.value) {
       return false;
     }
-    ensureActiveSegmentGroupForImage(imageID);
-    this.$paint.setBrushSize(this.brushSize);
+    // Selecting the tool configures the widget and nothing else. Storage is
+    // allocated by the first stroke, so picking up the brush and putting it
+    // down again leaves the image untouched.
+    this.setBrushSize(this.brushSize);
+    this.$paint.setBrushValue(SEGMENT_VALUE);
 
     isActive.value = true;
     return true;
@@ -449,17 +449,13 @@ export const usePaintToolStore = defineStore('paint', () => {
     const paint = state.manifest.tools?.paint;
     if (!paint) return;
 
-    paint.activeSegmentGroupID = activeSegmentGroupID.value ?? null;
     paint.brushSize = brushSize.value;
-    paint.activeSegment = activeSegment.value;
     paint.crossPlaneSync = crossPlaneSync.value;
   }
 
-  function deserialize(
-    this: _This,
-    manifest: Manifest,
-    segmentGroupIDMap: Record<string, string>
-  ) {
+  // The active segment rides on its segmentation, restored by the segmentation
+  // store before any tool deserializes.
+  function deserialize(this: _This, manifest: Manifest) {
     const paint = manifest.tools?.paint;
     if (!paint) return;
 
@@ -467,13 +463,6 @@ export const usePaintToolStore = defineStore('paint', () => {
       setBrushSize.call(this, paint.brushSize);
     }
     isActive.value = manifest.tools?.current === Tools.Paint;
-
-    if (paint.activeSegmentGroupID) {
-      activeSegmentGroupID.value =
-        segmentGroupIDMap[paint.activeSegmentGroupID];
-      setActiveSegmentGroup(activeSegmentGroupID.value);
-      setActiveSegment.call(this, paint.activeSegment);
-    }
     setCrossPlaneSync(paint.crossPlaneSync ?? false);
   }
 
@@ -481,9 +470,8 @@ export const usePaintToolStore = defineStore('paint', () => {
     activeMode,
     activePaintMode,
     processControlsOpen,
-    activeSegmentGroupID,
-    activeSegment,
     brushSize,
+    brushSizeMax,
     strokePoints,
     isActive,
     isPaintingModeActive,
@@ -499,13 +487,12 @@ export const usePaintToolStore = defineStore('paint', () => {
     setProcessControlsOpen,
     enterProcessMode,
     restoreModeAfterProcess,
-    setActiveSegmentGroup,
-    setActiveSegment,
     setBrushSize,
     setSliceAxis,
     setThresholdRange,
     setCrossPlaneSync,
     updatePaintPosition,
+    selectSegmentAt,
     startStroke,
     placeStrokePoint,
     endStroke,

@@ -1,10 +1,9 @@
-import { PROSTATEX_DATASET } from './configTestUtils';
-import { downloadFile, openVolViewPage, writeManifestToZip } from './utils';
+import { PROSTATEX_DATASET } from '../datasets';
+import { openVolViewPage, writeManifestToZip } from './utils';
+import { openSegmentShapes } from './segmentationTestUtils';
 
 describe('Sparse manifest with prostate rectangle', () => {
   it('loads prostate dataset with lesion rectangle annotation', async () => {
-    await downloadFile(PROSTATEX_DATASET.url, PROSTATEX_DATASET.name);
-
     const sparseManifest = {
       version: '6.1.0',
       dataSources: [
@@ -54,19 +53,12 @@ describe('Sparse manifest with prostate rectangle', () => {
     await writeManifestToZip(sparseManifest, fileName);
     await openVolViewPage(fileName);
 
-    const annotationsTab = await $(
-      'button[data-testid="module-tab-Annotations"]'
-    );
-    await annotationsTab.click();
-
-    const measurementsTab = await $('button.v-tab*=Measurements');
-    await measurementsTab.waitForClickable();
-    await measurementsTab.click();
+    await openSegmentShapes();
 
     await browser.waitUntil(
       async () => {
         const rectangleEntries = await $$(
-          '.v-list-item i.mdi-vector-square.tool-icon'
+          '[data-testid="segment-shape-row"] i.mdi-vector-square'
         );
         const count = await rectangleEntries.length;
         return count >= 1;

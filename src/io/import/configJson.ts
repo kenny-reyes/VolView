@@ -1,15 +1,34 @@
 import { z } from 'zod';
-import { isRecord, zodEnumFromObjKeys } from '@/src/utils';
+import {
+  segments,
+  labels,
+  normalizeSegmentConfig,
+} from '@/src/io/import/configSegments';
+import { configIo, RENAMED_IO_KEYS } from '@/src/io/import/configIo';
+import {
+  getEntries,
+  isRecord,
+  partition,
+  plural,
+  zodEnumFromObjKeys,
+} from '@/src/utils';
 import { ACTIONS } from '@/src/constants';
+import type { Action, Binding } from '@/src/constants';
 
-import { useRectangleStore } from '@/src/store/tools/rectangles';
-import { useRulerStore } from '@/src/store/tools/rulers';
-import { usePolygonStore } from '@/src/store/tools/polygons';
+import { surfaceWarning, useMessageStore } from '@/src/store/messages';
+import { useSegmentStore } from '@/src/segmentation/segments';
+import {
+  parseStatedColor,
+  rejectedColorsMessage,
+} from '@/src/segmentation/color';
 import { useViewStore } from '@/src/store/views';
 import { useWindowingStore } from '@/src/store/view-configs/windowing';
-import { actionToKey } from '@/src/composables/useKeyboardShortcuts';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
-import { AnnotationToolStore } from '@/src/store/tools/useAnnotationTool';
+import {
+  actionToKey,
+  bindingsOf,
+  isDispatchable,
+} from '@/src/composables/useKeyboardShortcuts';
+import { useSegmentationStore } from '@/src/segmentation/store';
 import useLoadDataStore from '@/src/store/load-data';
 import { layoutConfig } from '@/src/utils/layoutParsing';
 
@@ -21,52 +40,16 @@ const layouts = z.record(z.string(), layoutConfig).optional();
 // --------------------------------------------------------------------------
 // Keyboard shortcuts
 
+const bindingSchema = z.union([z.string(), z.array(z.string())]);
+
 const shortcuts = z
-  .partialRecord(zodEnumFromObjKeys(ACTIONS), z.string())
-  .optional();
-
-// --------------------------------------------------------------------------
-// Labels
-
-const color = z.string();
-
-const label = z.object({
-  color,
-  strokeWidth: z.number().optional(),
-});
-
-const rulerLabel = label;
-const polygonLabel = label;
-
-const rectangleLabel = z.intersection(
-  label,
-  z.object({
-    fillColor: color,
-  })
-);
-
-const labels = z
-  .object({
-    defaultLabels: z.record(z.string(), label).or(z.null()).optional(),
-    rulerLabels: z.record(z.string(), rulerLabel).or(z.null()).optional(),
-    rectangleLabels: z
-      .record(z.string(), rectangleLabel)
-      .or(z.null())
-      .optional(),
-    polygonLabels: z.record(z.string(), polygonLabel).or(z.null()).optional(),
-  })
+  .partialRecord(zodEnumFromObjKeys(ACTIONS), bindingSchema)
   .optional();
 
 // --------------------------------------------------------------------------
 // IO
 
-const io = z
-  .object({
-    segmentGroupSaveFormat: z.string().optional(),
-    segmentGroupExtension: z.string().default(''),
-    layerExtension: z.string().default(''),
-  })
-  .optional();
+const io = configIo.optional();
 
 // --------------------------------------------------------------------------
 // Window Level
@@ -80,14 +63,17 @@ const windowing = z
 
 const disabledViewTypes = z.array(z.enum(['2D', '3D', 'Oblique'])).optional();
 
-export const config = z.object({
+const configInput = z.object({
   layouts,
+  segments,
   labels,
   shortcuts,
   io,
   windowing,
   disabledViewTypes,
 });
+
+export const config = configInput.transform(normalizeSegmentConfig);
 
 export type Config = z.infer<typeof config>;
 
@@ -109,8 +95,15 @@ export type Config = z.infer<typeof config>;
 
 export type ConfigRecognition =
   // `ignoredKeys` lists the unknown top-level keys that were stripped (empty
-  // when every top-level key was a known section).
-  { kind: 'config'; config: Config; ignoredKeys: string[] } | { kind: 'data' };
+  // when every top-level key was a known section). `deprecations` holds one
+  // user-facing note per legacy key that was converted or ignored.
+  | {
+      kind: 'config';
+      config: Config;
+      ignoredKeys: string[];
+      deprecations: string[];
+    }
+  | { kind: 'data' };
 
 // ---------------------------------------------------------------------------
 // Config-section registry
@@ -139,7 +132,7 @@ export const registerConfigSection = <S extends z.ZodType>(
 
 // Base sections + every registered section define the known top-level keys.
 const fullConfigSchema = () =>
-  config.extend(
+  configInput.extend(
     Object.fromEntries(
       [...configSections.values()].map((section) => [
         section.key,
@@ -147,6 +140,45 @@ const fullConfigSchema = () =>
       ])
     )
   );
+
+const CONFIG_KEY_REPLACEMENTS = {
+  ...Object.fromEntries(
+    RENAMED_IO_KEYS.map(([legacy, key]) => [`io.${legacy}`, `io.${key}`])
+  ),
+  labels: 'segments',
+};
+
+const valueAt = (raw: Record<string, unknown>, path: string) =>
+  path
+    .split('.')
+    .reduce<unknown>(
+      (node, part) => (isRecord(node) ? node[part] : undefined),
+      raw
+    );
+
+const hasRectangleFill = (raw: Record<string, unknown>) => {
+  const rectangleLabels = valueAt(raw, 'labels.rectangleLabels');
+  return (
+    isRecord(rectangleLabels) &&
+    Object.values(rectangleLabels).some(
+      (label) => isRecord(label) && label.fillColor !== undefined
+    )
+  );
+};
+
+// A legacy key beside its replacement is ignored rather than converted.
+const deprecationNotes = (raw: Record<string, unknown>) => [
+  ...Object.entries(CONFIG_KEY_REPLACEMENTS)
+    .filter(([key]) => valueAt(raw, key) !== undefined)
+    .map(([key, replacement]) =>
+      valueAt(raw, replacement) === undefined
+        ? `${key} was migrated to ${replacement}. Update your configuration to use ${replacement}.`
+        : `${key} is ignored because ${replacement} is present. Remove ${key}.`
+    ),
+  ...(hasRectangleFill(raw)
+    ? ['Rectangle label fillColor is no longer supported and was ignored.']
+    : []),
+];
 
 export const recognizeConfig = async (
   raw: unknown
@@ -165,7 +197,12 @@ export const recognizeConfig = async (
   // `fullConfig.parse` relies on zod's default (non-strict) object behavior to
   // drop unknown keys; adding `.strict()` would silently break forward-compat.
   const ignoredKeys = presentKeys.filter((key) => !knownKeys.has(key));
-  return { kind: 'config', config: fullConfig.parse(raw), ignoredKeys };
+  return {
+    kind: 'config',
+    config: fullConfig.transform(normalizeSegmentConfig).parse(raw),
+    ignoredKeys,
+    deprecations: deprecationNotes(raw),
+  };
 };
 
 export const recognizeConfigFile = async (
@@ -174,29 +211,29 @@ export const recognizeConfigFile = async (
   return recognizeConfig(JSON.parse(await file.text()));
 };
 
-const applyLabels = (manifest: Config) => {
-  if (!manifest.labels) return;
+// The registry silently drops an unparseable color, so report it here.
+const reportUnparseableColors = (
+  configured: NonNullable<Config['segments']>,
+  addError: (message: string) => void
+) => {
+  const rejected = new Set<string>();
+  Object.entries(configured).forEach(([name, { color }]) => {
+    parseStatedColor(name, color, rejected);
+  });
+  const message = rejectedColorsMessage('config', rejected);
+  if (message) addError(message);
+};
 
-  // pass through null labels, use fallback labels if undefined
-  const defaultLabelsIfUndefined = <T>(toolLabels: T) => {
-    if (toolLabels === undefined) return manifest.labels?.defaultLabels;
-    return toolLabels;
-  };
-
-  const applyLabelsToStore = (
-    store: AnnotationToolStore,
-    maybeLabels: (typeof manifest.labels)[keyof typeof manifest.labels]
-  ) => {
-    const labelsOrFallback = defaultLabelsIfUndefined(maybeLabels);
-    if (!labelsOrFallback) return;
-    store.clearDefaultLabels();
-    store.mergeLabels(labelsOrFallback);
-  };
-
-  const { rulerLabels, rectangleLabels, polygonLabels } = manifest.labels;
-  applyLabelsToStore(useRulerStore(), rulerLabels);
-  applyLabelsToStore(useRectangleStore(), rectangleLabels);
-  applyLabelsToStore(usePolygonStore(), polygonLabels);
+// An omitted section leaves the registry alone; an empty record or null
+// clears what an earlier config contributed to it.
+const applySegments = (
+  manifest: Config,
+  addError: (message: string) => void
+) => {
+  const configured = manifest.segments;
+  if (configured === undefined) return;
+  if (configured) reportUnparseableColors(configured, addError);
+  useSegmentStore().segments.replaceConfigSegments(configured);
 };
 
 const applyLayout = (manifest: Config) => {
@@ -213,22 +250,52 @@ const applyLayout = (manifest: Config) => {
   viewStore.switchToNamedLayout(firstLayoutName);
 };
 
+/**
+ * Drops the bindings that could never fire, keeping the rest of the config.
+ * A shortcut that does nothing is worth a warning, not a rejected file.
+ */
+const dispatchableShortcuts = (
+  configured: NonNullable<Config['shortcuts']>
+) => {
+  const perAction = getEntries(configured).flatMap(([action, binding]) =>
+    binding
+      ? [[action, partition(isDispatchable, bindingsOf(binding))] as const]
+      : []
+  );
+
+  const undispatchable = perAction.flatMap(([, [, rejected]]) => rejected);
+  if (undispatchable.length) {
+    const noun = plural(undispatchable.length, 'shortcut');
+    surfaceWarning(
+      'Unbindable shortcut',
+      `Ignored unbindable ${noun}: ${undispatchable.join(', ')}. ` +
+        'The characters + - and _ separate the keys of a chord.'
+    );
+  }
+
+  return Object.fromEntries(
+    perAction
+      .filter(([, [usable]]) => usable.length)
+      .map(([action, [usable]]) => [action, usable])
+  ) as Partial<Record<Action, Binding>>;
+};
+
 const applyShortcuts = (manifest: Config) => {
   if (!manifest.shortcuts) return;
 
   actionToKey.value = {
     ...actionToKey.value,
-    ...manifest.shortcuts,
+    ...dispatchableShortcuts(manifest.shortcuts),
   };
 };
 
 const applyIo = (manifest: Config) => {
   if (!manifest.io) return;
 
-  if (manifest.io.segmentGroupSaveFormat)
-    useSegmentGroupStore().saveFormat = manifest.io.segmentGroupSaveFormat;
+  if (manifest.io.segmentationSaveFormat)
+    useSegmentationStore().saveFormat = manifest.io.segmentationSaveFormat;
   const loadDataStore = useLoadDataStore();
-  loadDataStore.segmentGroupExtension = manifest.io.segmentGroupExtension;
+  loadDataStore.segmentationExtension = manifest.io.segmentationExtension;
   loadDataStore.layerExtension = manifest.io.layerExtension;
 };
 
@@ -261,6 +328,10 @@ export const applyPreStateConfig = async (manifest: Config) => {
   await applyRegisteredSections(manifest);
 };
 
-export const applyPostStateConfig = (manifest: Config) => {
-  applyLabels(manifest);
+export const applyPostStateConfig = (
+  manifest: Config,
+  addError: (message: string) => void = (message) =>
+    useMessageStore().addError(message)
+) => {
+  applySegments(manifest, addError);
 };

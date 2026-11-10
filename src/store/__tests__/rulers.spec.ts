@@ -1,6 +1,15 @@
 import { describe, it, beforeEach, expect } from 'vitest';
+import JSZip from 'jszip';
+import type { Manifest } from '@/src/io/state-file/schema';
+import { MANIFEST_VERSION } from '@/src/io/state-file/serialize';
 
 import { setActivePinia, createPinia } from 'pinia';
+import { mintSegment } from '@/src/segmentation/__tests__/segmentMaskFixtures';
+import { nextTick } from 'vue';
+import { STROKE_WIDTH_ANNOTATION_TOOL_DEFAULT } from '@/src/config';
+import { cssColorToRGBA, rgbaToCssColor } from '@/src/segmentation/color';
+import { useSegmentationStore } from '@/src/segmentation/store';
+import { useSegmentStore } from '@/src/segmentation/segments';
 import { useRulerStore } from '@/src/store/tools/rulers';
 import { Ruler } from '@/src/types/ruler';
 import { RequiredWithPartial } from '@/src/types';
@@ -8,15 +17,7 @@ import { ToolID } from '@/src/types/annotation-tool';
 
 function createRuler(): RequiredWithPartial<
   Ruler,
-  | 'id'
-  | 'color'
-  | 'strokeWidth'
-  | 'label'
-  | 'labelName'
-  | 'hidden'
-  | 'metadata'
-  | 'frame'
-  | 'source'
+  'id' | 'segmentId' | 'hidden' | 'metadata' | 'frame' | 'source'
 > {
   return {
     firstPoint: [1, 1, 1],
@@ -83,4 +84,110 @@ describe('Ruler store', () => {
 
   // TODO testing jumpToRuler requires store integration
   // TODO testing (de)serialize requires store integration
+});
+
+describe('Ruler segment references', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  const segments = () => useSegmentStore().segments;
+
+  // Adding selects, so this is the segment a new ruler picks up.
+  const seedSegment = () => segments().addSegment({ name: 'Tumor' });
+
+  it('draws out of the shared registry', () => {
+    const store = useRulerStore();
+    seedSegment();
+
+    const id = store.addRuler(createRuler());
+
+    expect(store.appearanceOfTool(id)).toMatchObject({
+      name: 'Tumor',
+      strokeWidth: STROKE_WIDTH_ANNOTATION_TOOL_DEFAULT,
+    });
+  });
+
+  it('adds a ruler carrying the segment it was given', () => {
+    const store = useRulerStore();
+    const segmentId = seedSegment();
+
+    const id = store.addRuler({ ...createRuler(), segmentId });
+
+    expect(store.rulerByID[id].segmentId).toBe(segmentId);
+    expect(store.appearanceOfTool(id).name).toBe('Tumor');
+  });
+
+  it('defaults a new ruler to the selected segment', () => {
+    const store = useRulerStore();
+    const segmentId = seedSegment();
+
+    const id = store.addRuler(createRuler());
+
+    expect(store.rulerByID[id].segmentId).toBe(segmentId);
+  });
+
+  it('shows a rename on the rulers that reference the segment', async () => {
+    const store = useRulerStore();
+    const segmentId = seedSegment();
+    const id = store.addRuler({ ...createRuler(), segmentId });
+
+    segments().updateSegment(segmentId, {
+      name: 'Lesion',
+      color: cssColorToRGBA('blue'),
+    });
+    await nextTick();
+
+    expect(store.rulerByID[id].segmentId).toBe(segmentId);
+    expect(store.appearanceOfTool(id)).toMatchObject({
+      name: 'Lesion',
+      cssColor: rgbaToCssColor(cssColorToRGBA('blue')),
+    });
+  });
+
+  it('takes the rulers of a deleted segment with it', async () => {
+    const store = useRulerStore();
+    const segmentId = seedSegment();
+    const id = store.addRuler({ ...createRuler(), segmentId });
+
+    segments().deleteSegment(segmentId);
+    await nextTick();
+
+    expect(store.rulerByID[id]).toBeUndefined();
+  });
+
+  it('serializes ruler geometry with its shared segment reference', () => {
+    const store = useRulerStore();
+    const segmentId = seedSegment();
+    const ruler = createRuler();
+    const id = store.addRuler({ ...ruler, segmentId });
+    const manifest: Manifest = {
+      version: MANIFEST_VERSION,
+      dataSources: [],
+      tools: {},
+    };
+
+    store.serialize({ zip: new JSZip(), manifest });
+
+    expect(manifest.tools?.rulers).toMatchObject({
+      tools: [{ ...ruler, id, segmentId }],
+    });
+  });
+
+  it('shares the registry with the masks painted on an image', () => {
+    const store = useRulerStore();
+    const segmentation = useSegmentationStore().ensureSegmentationForImage('4');
+
+    const painted = useSegmentationStore().createMask(
+      segmentation.id,
+      mintSegment({ name: 'Tumor' })
+    );
+
+    const id = store.addRuler({
+      ...createRuler(),
+      segmentId: painted.segmentId,
+    });
+
+    expect(store.appearanceOfTool(id).name).toBe('Tumor');
+  });
 });

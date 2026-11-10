@@ -3,8 +3,8 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "VolView neutral backend contract",
-    "version": "0.2.0",
-    "description": "DRAFT 0.x — shapes may change until a second backend passes the conformance kit (the pinned 1.0 criterion). The neutral REST surface the VolView client calls to run processing tasks against a backend. A conforming server-side BACKEND implements these endpoints and the referenced wire schemas — no VolView client change is needed to bring a new backend online. Everything here is neutral: no backend routes, ids, status enums, or URL shapes leak. The artifact version is the draft artifact version, distinct from the shape versions: the result-intent vocabulary is at version 2 (INTENT_VOCABULARY_VERSION); the task-spec shape at version 1 (specVersion)."
+    "version": "0.3.0",
+    "description": "DRAFT 0.x — shapes may change until a second backend passes the conformance kit (the pinned 1.0 criterion). The neutral REST surface the VolView client calls to run processing tasks against a backend. A conforming server-side BACKEND implements these endpoints and the referenced wire schemas — no VolView client change is needed to bring a new backend online. Everything here is neutral: no backend routes, ids, status enums, or URL shapes leak. The artifact version is the draft artifact version, distinct from the shape versions: the result-intent vocabulary is at version 3 (INTENT_VOCABULARY_VERSION); the task-spec shape at version 1 (specVersion)."
   },
   "servers": [
     {
@@ -347,7 +347,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The resolved results as the { resultState, intents, missing } envelope (JobResults). Each entry of `intents` is a ResultIntent — a result row carrying a required `id` display key and required `name`/`url`, plus optional/null `mimeType`/`size` file metadata. `missing` counts declared outputs that never arrived plus recorded outputs that cannot be read. Total loss is a valid incomplete response with an empty intents array.",
+            "description": "The resolved results as the { resultState, intents, missing } envelope (JobResults). Each entry of `intents` is a ResultIntent — a result row carrying a required `id` display key, unique within the job, and required `name`/`url`, plus optional/null `mimeType`/`size` file metadata. `missing` counts declared outputs that never arrived plus recorded outputs that cannot be read. Total loss is a valid incomplete response with an empty intents array.",
             "content": {
               "application/json": {
                 "schema": {
@@ -717,7 +717,7 @@
                       }
                     },
                     "multiple": {
-                      "description": "When true, the parameter takes more than one value: the client sends one staged file per value, listed in `uris` in selection order. When absent or false, it takes a single value. Only labelmap source refs bind plurally today — every group whose parent is the active dataset, in store order; on other type tags the flag has no effect yet.",
+                      "description": "When true, the parameter may take more than one staged file, listed in `uris`; when absent or false, it takes one. The client honors this for labelmap inputs, staging the active image's segmentation as overlap-free parts: when true, every mask, spread across as many files as it takes for no two masks to share a voxel; when absent or false, only the non-conflicting subset that fits one file, with the remaining masks omitted whole and reported to the user. No mask is ever clipped to fit.",
                       "type": "boolean"
                     }
                   },
@@ -896,7 +896,8 @@
               "name",
               "referenceImage"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "description": "The staged bytes are a `.seg.nrrd` labelmap on the reference image's voxel grid. Label values run from 1 to N within each file, in the client's segment order, with 0 as background. Voxels are unsigned 8-bit for up to 255 labels and unsigned 16-bit beyond. Segment names and colors ride in the header."
           },
           {
             "type": "object",
@@ -1203,7 +1204,7 @@
                 "properties": {
                   "intent": {
                     "type": "string",
-                    "const": "add-segment-group"
+                    "const": "import-segmentation"
                   },
                   "id": {
                     "type": "string",
@@ -1244,10 +1245,12 @@
                         "value": {
                           "type": "integer",
                           "minimum": 1,
-                          "maximum": 9007199254740991
+                          "maximum": 9007199254740991,
+                          "description": "The label value, from 1 to 65535; 0 is background. The client stores labels in at most 16 bits: voxels holding a larger value import as background with a warning, and a segment declared with one arrives empty."
                         },
                         "name": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Binds the segment by exact name. A segment the client already holds under this name, with no mask on the target image yet, takes these voxels and keeps its own color and visibility. Otherwise the client creates a segment from this descriptor, with a numbered name when the existing one already has a mask on that image."
                         },
                         "color": {
                           "minItems": 4,
@@ -1574,6 +1577,9 @@
               "type": "string"
             },
             "additionalProperties": {}
+          },
+          "referenceImageParameter": {
+            "type": "string"
           }
         },
         "required": [
@@ -1701,12 +1707,14 @@
                   "type": "object",
                   "properties": {
                     "color": {
+                      "description": "A hex color such as `#d60000` or a CSS color keyword such as `lime`. It styles only a segment the label creates: a label whose name the client already holds keeps that segment's color and stroke width. Any other syntax, including functional forms such as `rgb()` and `hsl()`, is ignored and reported to the user, and a new segment then takes an automatic color.",
                       "type": "string"
                     },
                     "strokeWidth": {
                       "type": "number"
                     },
                     "fillColor": {
+                      "description": "Accepted so an existing producer keeps validating, and ignored on labels.",
                       "type": "string"
                     }
                   },
@@ -1723,12 +1731,14 @@
                   "type": "object",
                   "properties": {
                     "color": {
+                      "description": "A hex color such as `#d60000` or a CSS color keyword such as `lime`. It styles only a segment the label creates: a label whose name the client already holds keeps that segment's color and stroke width. Any other syntax, including functional forms such as `rgb()` and `hsl()`, is ignored and reported to the user, and a new segment then takes an automatic color.",
                       "type": "string"
                     },
                     "strokeWidth": {
                       "type": "number"
                     },
                     "fillColor": {
+                      "description": "Accepted so an existing producer keeps validating, and ignored on labels.",
                       "type": "string"
                     }
                   },
@@ -1745,12 +1755,14 @@
                   "type": "object",
                   "properties": {
                     "color": {
+                      "description": "A hex color such as `#d60000` or a CSS color keyword such as `lime`. It styles only a segment the label creates: a label whose name the client already holds keeps that segment's color and stroke width. Any other syntax, including functional forms such as `rgb()` and `hsl()`, is ignored and reported to the user, and a new segment then takes an automatic color.",
                       "type": "string"
                     },
                     "strokeWidth": {
                       "type": "number"
                     },
                     "fillColor": {
+                      "description": "Accepted so an existing producer keeps validating, and ignored on labels.",
                       "type": "string"
                     }
                   },

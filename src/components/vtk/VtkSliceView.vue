@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { ref, toRefs, provide, markRaw, effectScope, onUnmounted } from 'vue';
+import {
+  computed,
+  ref,
+  toRefs,
+  provide,
+  markRaw,
+  effectScope,
+  onUnmounted,
+} from 'vue';
 import { storeToRefs } from 'pinia';
 import vtkInteractorStyleManipulator from '@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator';
 import { useVtkView } from '@/src/core/vtk/useVtkView';
@@ -39,7 +47,13 @@ const { metadata: imageMetadata } = useImage(imageID);
 // use a detached scope so that actors can be removed from
 // the renderer before the renderer is deleted.
 const scope = effectScope(true);
-const view = scope.run(() => useVtkView(vtkContainerRef))!;
+const view = scope.run(() =>
+  useVtkView(vtkContainerRef, {
+    separateImageLayer: true,
+    clippingBounds: computed(() => imageMetadata.value.worldBounds),
+  })
+)!;
+
 onUnmounted(() => {
   scope.stop();
 });
@@ -52,10 +66,25 @@ const { interactorStyle } = useVtkInteractorStyle(
   vtkInteractorStyleManipulator,
   view
 );
+// Camera manipulators fit clipping to image bounds; widgets pick the upper layer.
+interactorStyle.setFocusedRenderer(view.imageRenderer);
 
 // bind slice and window configs
 // resizeToFit camera controls
-const autoFit = useAutoFitState(view.renderer.getActiveCamera());
+const autoFitEnabled = computed({
+  get: () =>
+    viewCameraStore.getConfig(viewID.value, imageID.value)?.autoFit ?? true,
+  set: (autoFit) => {
+    if (imageID.value) {
+      viewCameraStore.updateConfig(viewID.value, imageID.value, { autoFit });
+    }
+  },
+});
+
+const autoFit = useAutoFitState(
+  view.renderer.getActiveCamera(),
+  autoFitEnabled
+);
 
 function autoFitImage() {
   if (!autoFit.autoFit.value) return;
@@ -108,7 +137,6 @@ watchImmediate(
 usePersistCameraConfig(viewID, imageID, view.renderer.getActiveCamera());
 
 watchImmediate([imageMetadata, disableCameraAutoReset], () => {
-  if (!imageMetadata.value) return;
   if (
     viewCameraStore.isCameraInitialized(viewID.value, imageID.value) ||
     disableCameraAutoReset.value

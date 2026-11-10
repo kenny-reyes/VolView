@@ -1,10 +1,13 @@
 import AppPage from '../pageobjects/volview.page';
+import { PROSTATEX_DATASET } from '../datasets';
+import { openUrls } from './utils';
+import { moveTo } from './annotationTestUtils';
+
+const MAX_MISMATCH_PERCENT = 0.01;
 
 describe('Paint tool rendering', () => {
   it('should not black out axial view after painting', async () => {
-    await AppPage.open();
-    await AppPage.downloadProstateSample();
-    await AppPage.waitForViews();
+    await openUrls([PROSTATEX_DATASET]);
 
     const views2D = await AppPage.getViews2D();
     const axialView = views2D[0];
@@ -33,19 +36,58 @@ describe('Paint tool rendering', () => {
         .perform();
     }
 
+    const canvasImage = () =>
+      browser.execute(
+        (element) => (element as HTMLCanvasElement).toDataURL(),
+        canvas
+      );
+    const hovered = await canvasImage();
+    await moveTo(10, 10);
+    await browser.waitUntil(async () => (await canvasImage()) !== hovered, {
+      timeoutMsg: 'Brush preview should disappear when leaving the view',
+    });
+    const withoutPreview = await canvasImage();
+    const annotations = await axialView.$('.view-annotations');
+
     await browser.waitUntil(
       async () => {
         const result = await browser.checkElement(
           axialView,
-          'paint_tool_axial_view_after_stroke'
+          'paint_tool_axial_view_after_stroke',
+          {
+            biDiOrigin: 'viewport',
+            removeElements: [annotations],
+            rawMisMatchPercentage: true,
+            saveAboveTolerance: MAX_MISMATCH_PERCENT,
+          }
         );
-        return (result as number) < 5;
+        return (result as number) <= MAX_MISMATCH_PERCENT;
       },
       {
         timeout: 10000,
-        timeoutMsg:
-          'Axial view should not go black after painting with paint tool',
+        timeoutMsg: `Painted axial view should match its baseline within ${MAX_MISMATCH_PERCENT}%`,
         interval: 1000,
+      }
+    );
+
+    await moveTo(centerX - 60, centerY);
+    await browser.waitUntil(
+      async () => (await canvasImage()) !== withoutPreview,
+      { timeoutMsg: 'Brush preview should appear without painting' }
+    );
+    const firstPreview = await canvasImage();
+    await moveTo(centerX - 30, centerY);
+    await browser.waitUntil(
+      async () => (await canvasImage()) !== firstPreview,
+      { timeoutMsg: 'Brush preview should follow the pointer without painting' }
+    );
+
+    await moveTo(10, 10);
+    await browser.waitUntil(
+      async () => (await canvasImage()) === withoutPreview,
+      {
+        timeoutMsg:
+          'Moving the preview should leave the painted image unchanged',
       }
     );
   });

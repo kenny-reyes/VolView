@@ -3,38 +3,24 @@ import { onVTKEvent } from '@/src/composables/onVTKEvent';
 import { View } from '@/src/core/vtk/types';
 import { Maybe } from '@/src/types';
 import { VtkRenderWindowParentApi } from '@/src/types/vtk-types';
+import { releaseOpenGLRenderWindow } from '@/src/core/vtk/releaseRenderWindow';
+import { deleteInteractor } from '@/src/core/vtk/deleteInteractor';
 import { batchForNextTask } from '@/src/utils/batchForNextTask';
 import vtkRenderWindow from '@kitware/vtk.js/Rendering/Core/RenderWindow';
 import vtkRenderWindowInteractor from '@kitware/vtk.js/Rendering/Core/RenderWindowInteractor';
 import vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer';
 import vtkOpenGLRenderWindow from '@kitware/vtk.js/Rendering/OpenGL/RenderWindow';
 import vtkWidgetManager from '@kitware/vtk.js/Widgets/Core/WidgetManager';
+import type { Bounds } from '@kitware/vtk.js/types';
 import { useElementSize } from '@vueuse/core';
 import {
   inject,
   MaybeRef,
   onScopeDispose,
   unref,
-  watchEffect,
+  watch,
   watchPostEffect,
 } from 'vue';
-
-// vtk.js' public interactor.cancelAnimation() is a no-op while the
-// post-wheel extension window is still open (model._animationExtendedEnd),
-// so on dispose during that window a pending rAF survives and fires against
-// the deleted interactor. Reach into the private animationRequest field to
-// cancel it directly.
-function cancelPendingInteractorAnimationFrame(
-  interactor: vtkRenderWindowInteractor
-) {
-  const model = (
-    interactor as unknown as { get(): { animationRequest?: number | null } }
-  ).get();
-  if (model.animationRequest == null) return;
-
-  cancelAnimationFrame(model.animationRequest);
-  model.animationRequest = null;
-}
 
 export function useWebGLRenderWindow(
   renderWindow: vtkRenderWindow,
@@ -52,15 +38,17 @@ export function useWebGLRenderWindow(
 
     renderWindowView.setContainer(el);
     onCleanup(() => {
-      renderWindowView.setContainer(null as unknown as HTMLElement);
+      renderWindowView.setContainer(null);
     });
   });
 
   onScopeDispose(() => {
+    // a child node draws through its parent's context, so only the standalone
+    // case has one of its own to release
     if (parent?.renderWindowView) {
       parent.renderWindowView.removeNode(renderWindowView);
     } else {
-      renderWindowView.delete();
+      releaseOpenGLRenderWindow(renderWindowView);
     }
   });
 
@@ -77,12 +65,18 @@ export function useWidgetManager(renderer: vtkRenderer) {
   const manager = vtkWidgetManager.newInstance();
   manager.setRenderer(renderer);
 
+  onScopeDispose(() => manager.delete());
+
   const updatePickingState = () => {
     const enabled = manager.getPickingEnabled();
-    const widgetCount = manager.getWidgets().length;
-    if (!enabled && widgetCount) {
+    const widgets = manager.getWidgets();
+    const focused = widgets.find((widget) => widget.hasFocus());
+    const needsPicking = focused
+      ? focused.getNestedPickable()
+      : widgets.some((widget) => widget.getNestedPickable());
+    if (!enabled && needsPicking) {
       manager.enablePicking();
-    } else if (enabled && !widgetCount) {
+    } else if (enabled && !needsPicking) {
       manager.disablePicking();
     }
   };
@@ -93,11 +87,41 @@ export function useWidgetManager(renderer: vtkRenderer) {
   return manager;
 }
 
-export function useVtkView(container: MaybeRef<Maybe<HTMLElement>>): View {
+type VtkViewOptions = {
+  separateImageLayer?: boolean;
+  clippingBounds?: MaybeRef<Bounds>;
+};
+
+export function useVtkView(
+  container: MaybeRef<Maybe<HTMLElement>>,
+  { separateImageLayer = false, clippingBounds }: VtkViewOptions = {}
+): View {
   const parent = inject(VtkRenderWindowParentContext, null);
   const renderer = vtkRenderer.newInstance();
   const renderWindow = vtkRenderWindow.newInstance();
   renderWindow.addRenderer(renderer);
+
+  // Separate passes composite segmentations and widgets over the image layers,
+  // while retaining order-independent transparency within each renderer.
+  const imageRenderer = separateImageLayer
+    ? vtkRenderer.newInstance({ interactive: false })
+    : renderer;
+  if (separateImageLayer) {
+    imageRenderer.setActiveCamera(renderer.getActiveCamera());
+    imageRenderer.setBackground(0, 0, 0);
+    renderer.setLayer(1);
+    renderWindow.setNumberOfLayers(2);
+    renderWindow.addRenderer(imageRenderer);
+  }
+
+  let disposed = false;
+
+  // Registered before the view cleanup because the parent rebuilds its scene
+  // graph from its own child render window list.
+  onScopeDispose(() => {
+    disposed = true;
+    parent?.renderWindow.removeRenderWindow(renderWindow);
+  });
 
   parent?.renderWindow.addRenderWindow(renderWindow);
 
@@ -141,7 +165,10 @@ export function useVtkView(container: MaybeRef<Maybe<HTMLElement>>): View {
     renderWindow.render();
   };
 
+  // requests outlive the view: vtk event handlers and promises that settle
+  // after dispose has deleted the scene graph nodes a render would traverse
   const requestRender = ({ immediate } = { immediate: false }) => {
+    if (disposed) return;
     if (immediate) {
       immediateRender();
     }
@@ -151,6 +178,11 @@ export function useVtkView(container: MaybeRef<Maybe<HTMLElement>>): View {
   onVTKEvent(renderer, 'onModified', () => {
     requestRender();
   });
+  if (separateImageLayer) {
+    onVTKEvent(imageRenderer, 'onModified', () => {
+      requestRender();
+    });
+  }
 
   // set size
   const setSize = (width: number, height: number) => {
@@ -159,7 +191,7 @@ export function useVtkView(container: MaybeRef<Maybe<HTMLElement>>): View {
     const scaledWidth = Math.max(1, width * globalThis.devicePixelRatio);
     const scaledHeight = Math.max(1, height * globalThis.devicePixelRatio);
     renderWindowView.setSize(scaledWidth, scaledHeight);
-    renderer.resetCameraClippingRange();
+    imageRenderer.resetCameraClippingRange(unref(clippingBounds));
 
     parent?.renderWindowView.resizeFromChildRenderWindows();
     parent?.renderWindow.render();
@@ -167,25 +199,26 @@ export function useVtkView(container: MaybeRef<Maybe<HTMLElement>>): View {
   };
 
   const { width, height } = useElementSize(container);
-  watchEffect(() => {
-    setSize(width.value, height.value);
-  });
+  watch([width, height], ([w, h]) => setSize(w, h), { immediate: true });
 
   // cleanup
   onScopeDispose(() => {
     deferredRender.cancel();
 
     renderWindow.removeRenderer(renderer);
-    parent?.renderWindow.removeRenderWindow(renderWindow);
+    if (separateImageLayer) {
+      renderWindow.removeRenderer(imageRenderer);
+      imageRenderer.delete();
+    }
 
     renderer.delete();
     renderWindow.delete();
-    cancelPendingInteractorAnimationFrame(interactor);
-    interactor.delete();
+    deleteInteractor(interactor);
   });
 
   return {
     renderer,
+    imageRenderer,
     renderWindow,
     interactor,
     renderWindowView,

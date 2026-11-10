@@ -1,18 +1,18 @@
 import { clampValue } from '@/src/utils';
-import type { SegmentGroupMetadata } from '@/src/store/segmentGroups';
+import type { LabelmapSegment } from '@/src/segmentation/model';
 
 const toColorString = (r: number, g: number, b: number) =>
   [r / 255, g / 255, b / 255].map((c) => c.toFixed(6)).join(' ');
 
 /**
- * Builds Slicer-compatible .seg.nrrd metadata entries from VolView segment group metadata.
+ * Builds Slicer-compatible .seg.nrrd metadata entries from a labelmap's segment descriptors.
  * Returns a Map suitable for setting on an itk-wasm Image's metadata field.
  *
- * @param metadata - segment group metadata (names, colors, label values)
+ * @param segments - label descriptors (names, colors, label values) in write order
  * @param dimensions - [x, y, z] voxel dimensions of the labelmap
  */
 export const buildSegNrrdMetadata = (
-  metadata: SegmentGroupMetadata,
+  segments: LabelmapSegment[],
   dimensions: [number, number, number]
 ): Map<string, string> => {
   const entries = new Map<string, string>();
@@ -23,17 +23,14 @@ export const buildSegNrrdMetadata = (
 
   const extentStr = `0 ${dimensions[0] - 1} 0 ${dimensions[1] - 1} 0 ${dimensions[2] - 1}`;
 
-  metadata.segments.order.forEach((segmentValue, index) => {
-    const segment = metadata.segments.byValue[segmentValue];
-    if (!segment) return;
-
+  segments.forEach((segment, index) => {
     const prefix = `Segment${index}`;
     const [r, g, b] = segment.color;
 
-    entries.set(`${prefix}_ID`, `Segment_${segmentValue}`);
+    entries.set(`${prefix}_ID`, `Segment_${segment.value}`);
     entries.set(`${prefix}_Name`, segment.name);
     entries.set(`${prefix}_Color`, toColorString(r, g, b));
-    entries.set(`${prefix}_LabelValue`, String(segmentValue));
+    entries.set(`${prefix}_LabelValue`, String(segment.value));
     entries.set(`${prefix}_Layer`, '0');
     entries.set(`${prefix}_Extent`, extentStr);
     entries.set(`${prefix}_Tags`, '|');
@@ -44,11 +41,11 @@ export const buildSegNrrdMetadata = (
 
 export const maybeBuildSegNrrdMetadata = (
   format: string,
-  segMetadata: SegmentGroupMetadata,
+  segments: LabelmapSegment[],
   dimensions: [number, number, number]
 ): Map<string, string> | undefined =>
   format === 'seg.nrrd'
-    ? buildSegNrrdMetadata(segMetadata, dimensions)
+    ? buildSegNrrdMetadata(segments, dimensions)
     : undefined;
 
 // ---------------------------------------------------------------------------
@@ -72,7 +69,7 @@ export type ParsedSegment = {
 
 // Accept both Slicer's normalized RGB floats and the 0–255 integer convention
 // emitted by some other writers. Each channel is clamped so a hand-edited
-// header cannot leak a negative or >255 value into `SegmentMask.color`.
+// header cannot leak a negative or >255 value into a segment color.
 const fromColorString = (raw: string): [number, number, number] | undefined => {
   const parts = raw.trim().split(/\s+/).map(Number);
   if (parts.length < 3 || parts.slice(0, 3).some((n) => !Number.isFinite(n)))
@@ -133,11 +130,6 @@ export const parseSegNrrdMetadata = (
   return segments.length ? segments : undefined;
 };
 
-// A decoded segment as `decodeSegments` hands it to the store: a `ParsedSegment`
-// with the looser `number[]` color the default-numbering path already produces,
-// not the parser's stricter 4-tuple.
-export type DecodedSegment = Omit<ParsedSegment, 'color'> & { color: number[] };
-
 /**
  * Overlay embedded `.seg.nrrd` segment metadata onto the full voxel-value
  * enumeration. The enumeration (`values`) is the SPINE: every labelled voxel
@@ -157,14 +149,14 @@ export type DecodedSegment = Omit<ParsedSegment, 'color'> & { color: number[] };
 export const overlaySegmentMetadata = (
   values: number[],
   described: ParsedSegment[] | undefined,
-  makeDefault: (value: number) => DecodedSegment
-): DecodedSegment[] => {
+  makeDefault: (value: number) => ParsedSegment
+) => {
   const describedByValue = new Map(
     (described ?? []).map((seg) => [seg.value, seg] as const)
   );
   // `described` is freshly parsed per decode and discarded, so passing it
   // through by reference aliases nothing the caller keeps.
-  const merged: DecodedSegment[] = values.map(
+  const merged = values.map(
     (value) => describedByValue.get(value) ?? makeDefault(value)
   );
   // Append described values not in the enumeration. Iterate the DEDUPED map, NOT

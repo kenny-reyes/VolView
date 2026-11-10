@@ -1,20 +1,20 @@
 import vtkColorMaps from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction/ColorMaps';
-import MedicalPresets from '@/src/vtk/MedicalColorPresets.json';
+import { ColorMapPreset } from '@/src/types/color-map-preset';
+import MedicalPresets from './MedicalColorPresets.json';
+import DicomPresets from './DicomColorPresets.json';
 
-function registerPresets(presets: typeof MedicalPresets) {
-  for (let i = 0; i < presets.length; i += 1) {
-    vtkColorMaps.addPreset(presets[i]);
-  }
-}
-
-registerPresets(MedicalPresets);
-
-const twoHotOpaque = {
+MedicalPresets.forEach((preset) =>
+  vtkColorMaps.addPreset(preset as ColorMapPreset)
+);
+vtkColorMaps.addPreset({
   ...vtkColorMaps.getPresetByName('2hot'),
   Name: '2hot-opaque',
   OpacityPoints: [0, 1],
-};
-vtkColorMaps.addPreset(twoHotOpaque);
+} as ColorMapPreset);
+// DICOM PS3.6 Annex B: https://dicom.nema.org/medical/dicom/current/output/chtml/part06/chapter_B.html
+DicomPresets.forEach((preset) =>
+  vtkColorMaps.addPreset(preset as ColorMapPreset)
+);
 
 /* prettier-ignore */
 const GroupedPresets = [
@@ -69,4 +69,3 @@ const GroupedPresets = [
 ];
 
 export const PresetNameList = GroupedPresets.flatMap((group) => group.presets);
-export default GroupedPresets;

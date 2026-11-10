@@ -33,14 +33,23 @@ const isAnnotationWidgetState = (
 onVTKEvent(
   view.interactor,
   'onLeftButtonPress',
-  (event: any) => {
+  async (event: any) => {
     if (PLACING_TOOLS.includes(toolStore.currentTool)) {
       // avoid bugs when starting a placing tool on an existing tool and right clicking and deleting existing tools
       return;
     }
 
     const withModifiers = !!(event.shiftKey || event.controlKey);
-    const selectedData = view.widgetManager.getSelectedData();
+    const { x, y } = event.position;
+    // Picking clears the widget manager's standing selections, which the
+    // widgets read while handling this same press, so let them run first.
+    await Promise.resolve();
+    // Pick where the button went down. The widget manager's standing pick is
+    // whatever its last tracked mouse move resolved, which can be a different
+    // position or, mid capture, nothing at all.
+    const selectedData = await view.widgetManager.getSelectedDataForXY(x, y);
+    // the pick spans a capture, which the view teardown can outrun
+    if (view.widgetManager.isDeleted()) return;
     if ('widget' in selectedData) {
       const widget =
         selectedData.widget as Partial<vtkAnnotationToolWidget> | null;
@@ -67,7 +76,7 @@ onVTKEvent(
     }
   },
   {
-    // capture all events by calling handler before widgets
+    // Registered ahead of the widgets so one consuming the press cannot skip it
     priority: WIDGET_PRIORITY + 1,
   }
 );

@@ -1,7 +1,6 @@
 import { defineAnnotationToolStore } from '@/src/utils/defineAnnotationToolStore';
 import type { Vector3 } from '@kitware/vtk.js/types';
 import { Manifest, StateFile } from '@/src/io/state-file/schema';
-import { RECTANGLE_LABEL_DEFAULTS } from '@/src/config';
 import { ToolID } from '@/src/types/annotation-tool';
 
 import {
@@ -19,15 +18,10 @@ const rectangleDefaults = () => ({
   fillColor: 'transparent',
 });
 
-const newLabelDefault = {
-  fillColor: 'transparent',
-};
-
 export const useRectangleStore = defineAnnotationToolStore('rectangles', () => {
   const toolAPI = useAnnotationTool({
     toolDefaults: rectangleDefaults,
-    initialLabels: RECTANGLE_LABEL_DEFAULTS,
-    newLabelDefault,
+    manifestKey: 'rectangles',
   });
 
   function getPoints(id: ToolID) {
@@ -42,8 +36,16 @@ export const useRectangleStore = defineAnnotationToolStore('rectangles', () => {
     state.manifest.tools.rectangles = toolAPI.serializeTools();
   }
 
-  function deserialize(manifest: Manifest, dataIDMap: Record<string, string>) {
-    toolAPI.deserializeTools(manifest.tools?.rectangles, dataIDMap);
+  function deserialize(
+    manifest: Manifest,
+    dataIDMap: Record<string, string>,
+    segmentIdMap: Record<string, string>
+  ) {
+    toolAPI.deserializeTools(
+      manifest.tools?.rectangles,
+      dataIDMap,
+      segmentIdMap
+    );
   }
 
   return {

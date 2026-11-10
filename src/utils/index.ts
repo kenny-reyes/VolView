@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { TypedArray } from 'itk-wasm';
 import { parseUrl } from '@/src/utils/url';
 import { EPSILON } from '../constants';
-import { Maybe } from '../types';
 
 export function identity<T>(arg: T) {
   return arg;
@@ -96,6 +95,16 @@ export function partition<T>(
   return partitioned;
 }
 
+/** A cursor over `items`: each call hands out the next one, wrapping around. */
+export function cycle<T>(items: readonly T[]) {
+  let index = 0;
+  return () => {
+    const item = items[index];
+    index = (index + 1) % items.length;
+    return item;
+  };
+}
+
 export function partitionByType<T, U extends T>(
   guard: (x: T) => x is U,
   arr: T[]
@@ -136,6 +145,24 @@ export function arrayEquals<T>(a: ArrayLike<T>, b: ArrayLike<T>) {
   }
   return true;
 }
+
+/**
+ * Whether two records hold identical values under the same keys. Values
+ * compare by identity, which the constraint keeps meaningful: a record with an
+ * object or array field would never equal a copy of itself.
+ */
+export const sameFields = <
+  R extends Partial<Record<keyof R, string | number | boolean>>,
+>(
+  one: R,
+  other: R
+) => {
+  const keys = Object.keys(one) as (keyof R)[];
+  return (
+    keys.length === Object.keys(other).length &&
+    keys.every((key) => one[key] === other[key])
+  );
+};
 
 type ComparatorFunction<T> = (a: T, b: T) => boolean;
 export function arrayEqualsWithComparator<T>(
@@ -228,15 +255,6 @@ export const cleanUndefined = <T extends object>(record: T): Partial<T> =>
     Object.entries(record).filter(([, value]) => value !== undefined)
   ) as Partial<T>;
 
-// converts named colors (red, antiquewhite, etc) to hex
-export function standardizeColor(color: Maybe<string>) {
-  if (!color) return '#ffffff';
-  const ctx = document.createElement('canvas').getContext('2d');
-  if (!ctx) throw new Error('Could not create canvas context');
-  ctx.fillStyle = color;
-  return ctx.fillStyle;
-}
-
 export function zodEnumFromObjKeys<K extends string>(obj: Record<K, any>) {
   const [firstKey, ...otherKeys] = Object.keys(obj) as K[];
   return z.enum([firstKey, ...otherKeys]);
@@ -258,23 +276,6 @@ export const TypedArrayConstructorNames = [
   'Float64Array',
 ];
 
-/**
- * Creates a new typed array of the same type as the source array.
- * This utility handles the TypeScript typing issues when using array.constructor.
- *
- * @param sourceArray The source array to match the type of
- * @param arrayLength The length of the new array
- * @returns A new array of the same type as sourceArray
- */
-export function createTypedArrayLike<T extends TypedArray | number[]>(
-  sourceArray: T,
-  arrayLength: number
-): T {
-  return new (sourceArray.constructor as new (length: number) => T)(
-    arrayLength
-  );
-}
-
 // https://stackoverflow.com/a/74823834
 type Entries<T> = {
   [K in keyof T]-?: [K, T[K]];
@@ -283,23 +284,6 @@ type Entries<T> = {
 // Object.entries with keys preserved rather as string
 export const getEntries = <T extends object>(obj: T) =>
   Object.entries(obj) as Entries<T>;
-
-/**
- * Normalizes a list of objects to { order, byKey }
- * @param objects
- * @param key
- * @returns
- */
-export function normalizeForStore<T, K extends keyof T>(objects: T[], key: K) {
-  type KeyType = T[K];
-  const order: KeyType[] = objects.map((obj) => obj[key]);
-  const byKey = objects.reduce<Record<K, T>>(
-    (acc, obj) => ({ ...acc, [obj[key] as string | number | symbol]: obj }),
-    {} as Record<string | number | symbol, T>
-  );
-
-  return { order, byKey };
-}
 
 export function shortenNumber(value: number) {
   if (Number.isInteger(value)) {

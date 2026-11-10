@@ -2,8 +2,15 @@
   <div class="file-widget">
     <div class="input-key text-caption text-medium-emphasis">
       <v-icon size="16">{{ kind.icon }}</v-icon>
-      <span class="key-text">
-        {{ kind.caption }}{{ param.required ? '' : ' (optional)' }}
+      <span>
+        <span class="key-text">
+          {{ fieldLabel(param) }}{{ param.required ? '' : ' (optional)' }}
+        </span>
+        <span
+          v-if="fieldLabel(param) !== kind.caption"
+          class="source-caption"
+          >{{ kind.caption }}</span
+        >
       </span>
     </div>
     <div
@@ -11,6 +18,17 @@
       :class="{ 'text-error': bindingMessage }"
     >
       <span class="value-text">{{ bindingMessage ?? boundDisplayName }}</span>
+      <span
+        v-if="warning"
+        data-testid="staging-omission-notice"
+        class="text-warning d-inline-flex ml-2"
+        tabindex="0"
+      >
+        <v-icon size="18" role="img" :aria-label="warning"
+          >mdi-alert-outline</v-icon
+        >
+        <v-tooltip activator="parent">{{ warning }}</v-tooltip>
+      </span>
     </div>
   </div>
 </template>
@@ -19,6 +37,7 @@
 import { computed } from 'vue';
 import type { VolViewTaskParameter, InputValue } from '@/backend-contract';
 import { TYPE_TAG_ANNOTATIONS, TYPE_TAG_LABELMAP } from '@/backend-contract';
+import { fieldLabel } from '@/src/processing/engine/formModel';
 import {
   bindingStateMessage,
   type SourceRefBindingState,
@@ -32,24 +51,22 @@ const props = defineProps<{
   binding?: SourceRefBindingState;
   boundName?: string;
   boundType?: BoundSourceRefType;
+  imageIndex?: number;
+  warning?: string;
 }>();
 
-// How each bound kind names itself in the key column and the noun the binding
-// sentences use. `pluralCaption` is how a parameter taking more than one value
-// names itself; kinds without one do not bind plurally.
+// Vocabulary is shared by the caption and binding messages.
 type KindVocabulary = {
   icon: string;
   caption: string;
-  pluralCaption?: string;
   noun: SourceRefNoun;
 };
 
 const KINDS: Record<string, KindVocabulary> = {
   [TYPE_TAG_LABELMAP]: {
     icon: 'mdi-brush-outline',
-    caption: 'Active segment group',
-    pluralCaption: 'Segment groups on active dataset',
-    noun: 'segment group',
+    caption: 'Segmentation on active dataset',
+    noun: 'segmentation',
   },
   [TYPE_TAG_ANNOTATIONS]: {
     icon: 'mdi-ruler',
@@ -64,10 +81,6 @@ const IMAGE_KIND: KindVocabulary = {
   noun: 'image',
 };
 
-const multiple = computed(
-  () => props.param.kind === 'sourceRef' && props.param.multiple === true
-);
-
 // Before the binder has run, a param accepting exactly one type already names
 // its kind.
 const kind = computed(() => {
@@ -76,17 +89,23 @@ const kind = computed(() => {
       ? props.param.accepts[0]
       : undefined;
   const type = props.boundType ?? declared;
-  const resolved = (type ? KINDS[type] : undefined) ?? IMAGE_KIND;
-  const caption =
-    (multiple.value ? resolved.pluralCaption : undefined) ?? resolved.caption;
-  return { ...resolved, caption };
+  const declaredKind = type ? KINDS[type] : undefined;
+  if (declaredKind) return declaredKind;
+  return props.imageIndex && props.imageIndex > 0
+    ? {
+        ...IMAGE_KIND,
+        caption: `Image layer ${props.imageIndex}`,
+        noun: 'layer' as const,
+      }
+    : IMAGE_KIND;
 });
 
 const OPTIONAL_UNBOUND_STATES = new Set<SourceRefBindingState>([
   'unbound',
-  'no-segment-group',
+  'no-segmentation',
   'no-annotations',
   'no-reference-input',
+  'no-layer',
 ]);
 
 // Missing optional inputs are an intentional task state, not an instruction
@@ -101,7 +120,7 @@ const optionalUnbound = computed(
 
 const bindingMessage = computed(() =>
   props.binding && !optionalUnbound.value
-    ? bindingStateMessage(props.binding, kind.value.noun, multiple.value)
+    ? bindingStateMessage(props.binding, kind.value.noun)
     : undefined
 );
 
@@ -115,19 +134,28 @@ const boundDisplayName = computed(() =>
 <style scoped>
 .file-widget {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: fit-content(50%) minmax(0, 1fr);
   column-gap: 20px;
   align-items: start;
   padding: 2px 0;
 }
 .input-key {
   display: flex;
-  align-items: center;
+  min-width: 0;
+  align-items: flex-start;
   gap: 6px;
   line-height: 20px;
 }
 .input-key :deep(.v-icon) {
   flex: 0 0 auto;
+}
+.input-key > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.key-text,
+.source-caption {
+  display: block;
 }
 .input-value {
   min-width: 0;

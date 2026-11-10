@@ -31,6 +31,8 @@
           :binding="sourceRefStates?.[field.id]"
           :bound-name="sourceRefNames?.[field.id]"
           :bound-type="sourceRefTypes?.[field.id]"
+          :image-index="imageInputIndices[field.id]"
+          :warning="sourceRefWarnings?.[field.id]"
           @update:model-value="(v: ProcessingValue) => update(field.id, v)"
         />
       </div>
@@ -48,15 +50,22 @@
     </v-alert>
 
     <!-- Low-emphasis on purpose: accent blue is reserved for the active tab and links. -->
-    <v-btn
+    <reasoned-action
+      :reason="submitDisabledReason"
+      location="end"
       block
-      variant="tonal"
-      :disabled="issues.length > 0 || hasWidgetErrors || submitting"
-      :loading="submitting"
-      @click="onSubmit"
+      v-slot="{ disabled }"
     >
-      Submit
-    </v-btn>
+      <v-btn
+        block
+        variant="tonal"
+        :disabled="disabled"
+        :loading="submitting"
+        @click="onSubmit"
+      >
+        Submit
+      </v-btn>
+    </reasoned-action>
 
     <div
       v-if="model.hidden.length > 0"
@@ -77,6 +86,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
+import ReasonedAction from '@/src/components/ReasonedAction.vue';
 
 import type { ProcessingValue } from '@/src/processing/types';
 import {
@@ -87,6 +97,7 @@ import {
 } from '@/src/processing/engine/formModel';
 import type { SourceRefBindingState } from '@/src/processing/engine/mintInput';
 import type { BoundSourceRefType } from '@/src/processing/engine/sourceRefs';
+import { TYPE_TAG_IMAGE } from '@/backend-contract';
 
 import BooleanWidget from './widgets/BooleanWidget.vue';
 import NumberWidget from './widgets/NumberWidget.vue';
@@ -103,6 +114,7 @@ const props = defineProps<{
   sourceRefStates?: Record<string, SourceRefBindingState>;
   sourceRefNames?: Record<string, string>;
   sourceRefTypes?: Record<string, BoundSourceRefType>;
+  sourceRefWarnings?: Record<string, string>;
   submitting?: boolean;
 }>();
 const emit = defineEmits<{
@@ -132,8 +144,13 @@ watch(
     widgetErrors.value = {};
   }
 );
-const hasWidgetErrors = computed(
-  () => Object.keys(widgetErrors.value).length > 0
+const submitDisabledReason = computed(() =>
+  props.submitting
+    ? 'Submitting the task'
+    : (props.issues[0]?.message ??
+      (Object.keys(widgetErrors.value).length
+        ? 'Correct the invalid parameter values first'
+        : ''))
 );
 
 function onSubmit() {
@@ -149,6 +166,20 @@ const parameterFields = computed(() =>
 
 const inputFields = computed(() =>
   props.model.fields.filter((f) => f.kind === 'sourceRef')
+);
+
+const imageInputIndices = computed(() =>
+  Object.fromEntries(
+    inputFields.value
+      .filter(
+        (field) =>
+          props.sourceRefTypes?.[field.id] === TYPE_TAG_IMAGE ||
+          (!props.sourceRefTypes?.[field.id] &&
+            field.accepts.length === 1 &&
+            field.accepts[0] === TYPE_TAG_IMAGE)
+      )
+      .map((field, index) => [field.id, index])
+  )
 );
 
 function widgetFor(kind: FormField['kind']) {

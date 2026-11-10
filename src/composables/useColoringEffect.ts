@@ -17,28 +17,21 @@ import vtkColorMaps from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction/C
 import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
 import vtkPiecewiseGaussianWidget from '@kitware/vtk.js/Interaction/Widgets/PiecewiseGaussianWidget';
 
-export interface ApplyColoringParams {
+type ApplyColoringParams = {
   props: {
     colorFunction: ColorTransferFunction;
     opacityFunction: OpacityFunction;
   };
   cfun: vtkColorTransferFunction;
   ofun: vtkPiecewiseFunction;
-  componentIndex?: number;
-}
+};
 
-export function applyColoring({
+function applyColoring({
   props: { colorFunction, opacityFunction },
   cfun,
   ofun,
-  componentIndex = -1,
 }: ApplyColoringParams) {
-  if (componentIndex === -1) {
-    cfun.setVectorModeToMagnitude();
-  } else {
-    cfun.setVectorModeToComponent();
-    cfun.setVectorComponent(componentIndex);
-  }
+  cfun.setVectorModeToMagnitude();
 
   const preset = vtkColorMaps.getPresetByName(colorFunction.preset);
   if (preset) {
@@ -49,6 +42,13 @@ export function applyColoring({
     cfun.setMappingRange(...colorFunction.mappingRange);
   }
 
+  applyOpacityFunction(opacityFunction, ofun);
+}
+
+export function applyOpacityFunction(
+  opacityFunction: OpacityFunction,
+  ofun: vtkPiecewiseFunction
+) {
   const { mappingRange } = opacityFunction;
   if (!isZeroWidthRange(opacityFunction.mappingRange)) {
     ofun.setRange(...opacityFunction.mappingRange);

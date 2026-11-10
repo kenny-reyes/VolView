@@ -1,15 +1,20 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
+import {
+  boundMasks,
+  mintSegment,
+} from '@/src/segmentation/__tests__/segmentMaskFixtures';
+import { nextTick } from 'vue';
 import vtkImageData from '@kitware/vtk.js/Common/DataModel/ImageData';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 
 import { useImageCacheStore } from '@/src/store/image-cache';
 import { useDatasetStore } from '@/src/store/datasets';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { useSegmentationStore } from '@/src/segmentation/store';
+import { useSegmentStore } from '@/src/segmentation/segments';
 import { useRulerStore } from '@/src/store/tools/rulers';
 import { useViewStore } from '@/src/store/views';
 import { useCropStore } from '@/src/store/tools/crop';
-import { usePaintToolStore } from '@/src/store/tools/paint';
 
 // Bind an existing (default-layout) view to a dataset via the public API —
 // `addView` is internal, but every fresh store already seats slot views.
@@ -57,46 +62,69 @@ const makeRuler = (imageID: string) =>
     placing: false,
   }) as never;
 
+const seatMask = (imageId: string) => {
+  const segmentations = useSegmentationStore();
+  const segmentationId = segmentations.ensureSegmentationForImage(imageId).id;
+  const maskId = segmentations.createMask(segmentationId, mintSegment()).id;
+  segmentations.maskVoxels(maskId).materialize();
+  return { segmentationId, maskId };
+};
+
 describe('dataset remove — synchronous reference cascade', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
   });
 
-  it('clears segment groups whose parent image was removed', () => {
+  it('clears ALL segment masks when an image has several (no splice-skip)', () => {
     seatImage('img-1', 'CT');
-    const segmentGroups = useSegmentGroupStore();
-    const groupId = segmentGroups.newLabelmapFromImage('img-1');
-    expect(groupId).not.toBeNull();
-    expect(segmentGroups.orderByParent['img-1']).toContain(groupId);
+    const segmentations = useSegmentationStore();
+    const first = seatMask('img-1');
+    const rest = ['A', 'B'].map((name) => {
+      const segment = segmentations.createMask(
+        first.segmentationId,
+        mintSegment({
+          name,
+        })
+      );
+      segmentations.maskVoxels(segment.id).materialize();
+      return segment.id;
+    });
+    const maskIds = [first.maskId, ...rest];
+    expect(
+      boundMasks()
+        .map((mask) => mask.id)
+        .sort()
+    ).toEqual([...maskIds].sort());
 
     useDatasetStore().remove('img-1');
 
-    expect(segmentGroups.orderByParent['img-1'] ?? []).toEqual([]);
-    expect(segmentGroups.metadataByID).not.toHaveProperty(groupId as string);
+    expect(boundMasks()).toEqual([]);
   });
 
-  it('clears ALL segment groups when an image has several (no splice-skip)', () => {
+  it('removes the segmentation and its masks with the parent image', () => {
     seatImage('img-1', 'CT');
-    const segmentGroups = useSegmentGroupStore();
-    const groupA = segmentGroups.newLabelmapFromImage('img-1');
-    const groupB = segmentGroups.newLabelmapFromImage('img-1');
-    const groupC = segmentGroups.newLabelmapFromImage('img-1');
-    expect(groupA).not.toBeNull();
-    expect(groupB).not.toBeNull();
-    expect(groupC).not.toBeNull();
-    expect(segmentGroups.orderByParent['img-1']).toEqual([
-      groupA,
-      groupB,
-      groupC,
-    ]);
+    const segmentations = useSegmentationStore();
+    const { segmentationId, maskId } = seatMask('img-1');
+    expect(boundMasks().map((mask) => mask.id)).toContain(maskId);
 
     useDatasetStore().remove('img-1');
 
-    expect(segmentGroups.orderByParent['img-1'] ?? []).toEqual([]);
-    [groupA, groupB, groupC].forEach((id) => {
-      expect(segmentGroups.metadataByID).not.toHaveProperty(id as string);
-      expect(segmentGroups.dataIndex).not.toHaveProperty(id as string);
-    });
+    expect(segmentations.getSegmentationForImage('img-1')).toBeFalsy();
+    expect(segmentations.segmentations).not.toHaveProperty(segmentationId);
+    expect(boundMasks()).toEqual([]);
+  });
+
+  it('leaves another image segmentation intact', () => {
+    seatImage('img-1', 'CT');
+    seatImage('img-2', 'PET');
+    const segmentations = useSegmentationStore();
+    seatMask('img-1');
+    const kept = seatMask('img-2');
+
+    useDatasetStore().remove('img-1');
+
+    expect(segmentations.getSegmentationForImage('img-2')).toBeTruthy();
+    expect(boundMasks().map((mask) => mask.id)).toEqual([kept.maskId]);
   });
 
   it('clears annotation tools bound to the removed image', () => {
@@ -120,6 +148,25 @@ describe('dataset remove — synchronous reference cascade', () => {
     expect(viewStore.getViewsForData('img-1')).toEqual([]);
   });
 
+  it('detaches consumers before disposing the removed image', async () => {
+    seatImage('img-1', 'CT');
+    const imageCacheStore = useImageCacheStore();
+    const image = imageCacheStore.imageById['img-1'];
+    const dispose = vi.spyOn(image, 'dispose');
+    const viewStore = useViewStore();
+    bindFirstViewTo('img-1');
+
+    useDatasetStore().remove('img-1');
+
+    expect(imageCacheStore.imageById).not.toHaveProperty('img-1');
+    expect(viewStore.getViewsForData('img-1')).toEqual([]);
+    expect(dispose).not.toHaveBeenCalled();
+
+    await nextTick();
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
   it('drops crop state keyed by the removed image', () => {
     seatImage('img-1', 'CT');
     const cropStore = useCropStore();
@@ -135,17 +182,19 @@ describe('dataset remove — synchronous reference cascade', () => {
     expect('img-1' in cropStore.croppingByImageID).toBe(false);
   });
 
-  it('nulls the active paint segment group when its parent image is removed', () => {
+  it('removes the records of a deleted image and keeps their segment', () => {
     seatImage('img-1', 'CT');
-    const segmentGroups = useSegmentGroupStore();
-    const paintStore = usePaintToolStore();
-    const groupId = segmentGroups.newLabelmapFromImage('img-1');
-    paintStore.setActiveSegmentGroup(groupId);
-    expect(paintStore.activeSegmentGroupID).toBe(groupId);
+    seatImage('img-2', 'PET');
+    const segmentationStore = useSegmentationStore();
+    const { maskId } = seatMask('img-1');
+    const { segmentId } = segmentationStore.getMask(maskId);
+    useSegmentStore().segments.selectSegment(segmentId);
 
     useDatasetStore().remove('img-1');
 
-    expect(paintStore.activeSegmentGroupID).toBeNull();
+    expect(segmentationStore.maskExists(maskId)).toBe(false);
+    // A segment outlives an image it was painted on while another remains.
+    expect(useSegmentStore().segments.selectedSegmentId.value).toBe(segmentId);
   });
 
   it('leaves references to OTHER datasets intact', () => {
@@ -184,8 +233,18 @@ describe('manifest-ref declarations (cascade-owned save backstop coverage)', () 
         rectangles: { tools: [{ imageID: 'ghost-rect-img' }] },
         polygons: { tools: [{ imageID: 'ghost-poly-img' }] },
         crop: { 'ghost-crop-img': {} },
-        paint: { activeSegmentGroupID: 'ghost-group' },
       },
+      segmentations: [
+        {
+          parentImage: 'ghost-seg-img',
+          masks: [
+            {
+              segmentId: 'ghost-segment',
+              representations: {},
+            },
+          ],
+        },
+      ],
     });
 
     const found = refs.map((ref) => `${ref.where} -> ${ref.kind} ${ref.id}`);
@@ -205,7 +264,10 @@ describe('manifest-ref declarations (cascade-owned save backstop coverage)', () 
       'tools.crop[ghost-crop-img] -> dataset ghost-crop-img'
     );
     expect(found).toContain(
-      'tools.paint.activeSegmentGroupID -> segmentGroup ghost-group'
+      'segmentations[0].parentImage -> dataset ghost-seg-img'
+    );
+    expect(found).toContain(
+      'segmentations[0].masks[0].segmentId -> segment ghost-segment'
     );
   });
 });

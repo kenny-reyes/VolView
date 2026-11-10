@@ -1,9 +1,45 @@
-import type { JobState, JobHistorySummary } from '@/backend-contract';
+import type {
+  JobState,
+  JobHistorySummary,
+  JobHistoryDetail,
+} from '@/backend-contract';
+import {
+  inputValueSchema,
+  TYPE_TAG_ANNOTATIONS,
+  TYPE_TAG_LABELMAP,
+} from '@/backend-contract';
 import type {
   ProcessingJobStatus,
   SubmittedJobContext,
 } from '@/src/processing/types';
 import { jobKey } from '@/src/processing/types';
+
+// Staged inputs derive FROM the scene rather than naming a dataset, so they are
+// never parent-image candidates. Excluding them by tag keeps the open image
+// vocabulary open: anything else that carries provenance URIs counts.
+const STAGED_INPUT_TYPES: ReadonlySet<string> = new Set([
+  TYPE_TAG_LABELMAP,
+  TYPE_TAG_ANNOTATIONS,
+]);
+
+function isImageInputValue(v: unknown): v is { type: string; uris: string[] } {
+  const parsed = inputValueSchema.safeParse(v);
+  return parsed.success && !STAGED_INPUT_TYPES.has(parsed.data.type);
+}
+
+// A saved parameter name identifies the reference independently of JSON key
+// order. Older jobs without it are unambiguous only with one image input.
+export const selectParentImageUris = (
+  parameters: JobHistoryDetail['parameters'],
+  referenceImageParameter?: string
+): string[] | undefined => {
+  if (referenceImageParameter !== undefined) {
+    const value = parameters?.[referenceImageParameter];
+    return isImageInputValue(value) ? value.uris : undefined;
+  }
+  const images = Object.values(parameters ?? {}).filter(isImageInputValue);
+  return images.length === 1 ? images[0].uris : undefined;
+};
 
 // Rows key on (providerId, jobId) because two providers may share a raw jobId.
 export type TrackedJobHistorySummary = JobHistorySummary & {

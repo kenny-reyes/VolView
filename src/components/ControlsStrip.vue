@@ -185,6 +185,6 @@ const { count: msgCount, badgeColor: msgBadgeColor } = useMessageBubble();
   width: 75%;
   height: 1px;
   border: none;
-  border-top: 1px solid rgb(112, 112, 112);
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.3);
 }
 </style>

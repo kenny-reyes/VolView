@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { resolveBaseColorPreset } from '@/src/vtk/LayerColorPresets';
 import { markRaw, reactive, ref } from 'vue';
 import { createEventHook } from '@vueuse/core';
 import {
@@ -26,8 +27,15 @@ const minMaxToWidthLevel = (min: number, max: number) => ({
   level: (max + min) / 2,
 });
 
+const withAppearanceDefaults = (config: WindowLevelConfig) => ({
+  ...config,
+  preset: resolveBaseColorPreset(config.preset),
+  visibility: config.visibility ?? true,
+});
+
 export const defaultWindowLevelConfig = () =>
   ({
+    visibility: true,
     width: 1,
     level: 0.5,
     auto: WL_AUTO_DEFAULT,
@@ -36,7 +44,10 @@ export const defaultWindowLevelConfig = () =>
   }) as WindowLevelConfig;
 
 export const useWindowingStore = defineStore('windowing', () => {
-  const configs = reactive<DoubleKeyRecord<WindowLevelConfig>>({});
+  const configs = reactive<
+    DoubleKeyRecord<ReturnType<typeof withAppearanceDefaults>>
+  >({});
+
   const runtimeConfigWindowLevel = ref<WindowLevel | undefined>();
 
   const imageStatsStore = useImageStatsStore();
@@ -75,12 +86,13 @@ export const useWindowingStore = defineStore('windowing', () => {
   };
 
   const getConfig = (viewID: string, dataID: string): WindowLevelConfig => {
-    const internalConfig =
+    const internalConfig = withAppearanceDefaults(
       getDoubleKeyRecord(configs, viewID, dataID) ??
-      computeDefaultConfig(dataID);
+        computeDefaultConfig(dataID)
+    );
 
     if (!internalConfig.useAuto) {
-      return { ...internalConfig };
+      return internalConfig;
     }
 
     const autoKey = internalConfig.auto;
@@ -92,7 +104,7 @@ export const useWindowingStore = defineStore('windowing', () => {
         ...minMaxToWidthLevel(min, max),
       };
     }
-    return { ...internalConfig };
+    return internalConfig;
   };
 
   const getInternalConfig = (viewID: Maybe<string>, dataID: Maybe<string>) =>
@@ -105,7 +117,7 @@ export const useWindowingStore = defineStore('windowing', () => {
     userTriggered = false
   ) => {
     const currentInternalConfig = getInternalConfig(viewID, dataID);
-    const defaults = defaultWindowLevelConfig();
+    const defaults = computeDefaultConfig(dataID);
 
     let effectiveUseAuto = currentInternalConfig?.useAuto ?? defaults.useAuto;
     let widthLevelPatchOnSwitchingFromAuto;
@@ -120,20 +132,18 @@ export const useWindowingStore = defineStore('windowing', () => {
       patch.useAuto === undefined
     ) {
       effectiveUseAuto = false;
-      if (!effectiveUseAuto) {
-        // patch may be only width or level so ensure we have both in the end
-        const config = getConfig(viewID, dataID);
-        widthLevelPatchOnSwitchingFromAuto = {
-          width: config.width,
-          level: config.level,
-        };
-      }
+      // patch may be only width or level so ensure we have both in the end
+      const config = getConfig(viewID, dataID);
+      widthLevelPatchOnSwitchingFromAuto = {
+        width: config.width,
+        level: config.level,
+      };
     }
 
     // Ensure we always have required fields from defaults
     const baseConfig = currentInternalConfig || defaults;
 
-    const newInternalConfig = {
+    const newInternalConfig = withAppearanceDefaults({
       ...baseConfig,
       ...widthLevelPatchOnSwitchingFromAuto,
       ...patch,
@@ -144,7 +154,7 @@ export const useWindowingStore = defineStore('windowing', () => {
         currentInternalConfig?.userTriggered ||
         userTriggered ||
         patch.userTriggered,
-    };
+    });
 
     patchDoubleKeyRecord(configs, viewID, dataID, newInternalConfig);
 
@@ -182,6 +192,7 @@ export const useWindowingStore = defineStore('windowing', () => {
   return {
     runtimeConfigWindowLevel,
     getConfig,
+    getInternalConfig,
     updateConfig,
     resetConfig,
     removeView,

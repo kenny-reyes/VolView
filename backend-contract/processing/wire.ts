@@ -18,10 +18,9 @@ import {
 } from './task-spec';
 import { pathSegmentIdSchema } from './ids';
 
-// Bump when the intent vocabulary's shape changes so producers and the applier
-// can negotiate compatibility. Adding an intent is a compatible bump: an older
-// client demotes the unknown intent through the fail-open branch above.
-export const INTENT_VOCABULARY_VERSION = 2;
+// Names the intent vocabulary's shape in the OpenAPI text; never sent. An older
+// client demotes an unknown intent through `resultIntentSchema` below.
+export const INTENT_VOCABULARY_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Input value: what the client sends at submit
@@ -59,11 +58,15 @@ const stagedDescriptorCommon = {
   referenceImage: stagedReferenceImageSchema,
 };
 
-// A parent-bound labelmap: the segment-group bytes overlaying the image.
-const stageLabelmapDescriptorSchema = z.strictObject({
-  type: z.literal(TYPE_TAG_LABELMAP),
-  ...stagedDescriptorCommon,
-});
+// A parent-bound labelmap: the segmentation bytes overlaying the image.
+const stageLabelmapDescriptorSchema = z
+  .strictObject({
+    type: z.literal(TYPE_TAG_LABELMAP),
+    ...stagedDescriptorCommon,
+  })
+  .describe(
+    "The staged bytes are a `.seg.nrrd` labelmap on the reference image's voxel grid. Label values run from 1 to N within each file, in the client's segment order, with 0 as background. Voxels are unsigned 8-bit for up to 255 labels and unsigned 16-bit beyond. Segment names and colors ride in the header."
+  );
 
 // A parent-bound annotations file: the vector annotations (rulers, rectangles,
 // polygons) drawn on the image, as the `annotations.ts` interchange format.
@@ -158,10 +161,21 @@ export type NeutralJobStatus = z.infer<typeof neutralJobStatusSchema>;
 export const RESULT_INTENTS = [
   'add-base-image',
   'add-layer',
-  'add-segment-group',
+  'import-segmentation',
   'add-annotations',
 ] as const;
 export type ResultIntentName = (typeof RESULT_INTENTS)[number];
+
+// Names an earlier vocabulary gave an intent whose shape has not changed since.
+// A client reads one as its current name, so a producer still on the old
+// vocabulary keeps applying and the two sides need not deploy in lockstep.
+// A Map, so a wire string naming an Object.prototype key resolves to nothing.
+export const LEGACY_RESULT_INTENT_NAMES: ReadonlyMap<string, ResultIntentName> =
+  new Map([['add-segment-group', 'import-segmentation']]);
+
+export const currentResultIntentName = (intent: unknown) =>
+  (typeof intent === 'string' && LEGACY_RESULT_INTENT_NAMES.get(intent)) ||
+  intent;
 
 // Provenance tag on a result: the durable idempotency identity the client
 // preserves on generated scene state so restored results can be recognized.
@@ -177,8 +191,18 @@ const colorChannel = z.number().int().min(0).max(255);
 // A segment descriptor: `value` is a label index >= 1 (0 is reserved
 // background), `color` is RGBA 0-255.
 export const segmentDescriptorSchema = z.object({
-  value: z.number().int().min(1),
-  name: z.string(),
+  value: z
+    .number()
+    .int()
+    .min(1)
+    .describe(
+      'The label value, from 1 to 65535; 0 is background. The client stores labels in at most 16 bits: voxels holding a larger value import as background with a warning, and a segment declared with one arrives empty.'
+    ),
+  name: z
+    .string()
+    .describe(
+      'Binds the segment by exact name. A segment the client already holds under this name, with no mask on the target image yet, takes these voxels and keeps its own color and visibility. Otherwise the client creates a segment from this descriptor, with a numbered name when the existing one already has a mask on that image.'
+    ),
   color: z.tuple([colorChannel, colorChannel, colorChannel, colorChannel]),
   visible: z.boolean().optional(),
 });
@@ -186,9 +210,10 @@ export type SegmentDescriptor = z.infer<typeof segmentDescriptorSchema>;
 
 // The ONE canonical result-list-item shape, shared by every producer, the
 // client, the generated OpenAPI, the fixtures, and the backend copy. `id` is the
-// display key (required, nonempty); `name`/`url` are required; `mimeType`/`size`
-// are advisory file metadata that may be null. Every intent branch is built FROM
-// this shape, so there is no payload the contract accepts but the client rejects.
+// display key, unique within the job (required, nonempty); `name`/`url` are
+// required; `mimeType`/`size` are advisory file metadata that may be null. Every
+// intent branch is built FROM this shape, so there is no payload the contract
+// accepts but the client rejects.
 export const resultListItemSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
@@ -212,13 +237,13 @@ const addLayer = z
   .object({ intent: z.literal('add-layer'), ...resultListItemSchema.shape })
   .passthrough();
 
-// `add-segment-group` carries OPTIONAL `segments` (the bare-labelmap +
+// `import-segmentation` carries OPTIONAL `segments` (the bare-labelmap +
 // labels-sidecar case; a `seg.nrrd` with embedded metadata carries none — the
 // client uses `segments` when present, else the file's own metadata) and an
 // optional `source` provenance tag (the idempotency key).
-const addSegmentGroup = z
+const importSegmentation = z
   .object({
-    intent: z.literal('add-segment-group'),
+    intent: z.literal('import-segmentation'),
     ...resultListItemSchema.shape,
     segments: z.array(segmentDescriptorSchema).optional(),
     source: resultSourceSchema.optional(),
@@ -244,7 +269,7 @@ const addAnnotations = z
 export const knownResultIntentSchema = z.discriminatedUnion('intent', [
   addBaseImage,
   addLayer,
-  addSegmentGroup,
+  importSegmentation,
   addAnnotations,
 ]);
 
@@ -319,6 +344,7 @@ export const jobHistoryDetailSchema = z.object({
   jobId: pathSegmentIdSchema,
   log: z.array(z.string()),
   parameters: z.record(z.string(), z.unknown()),
+  referenceImageParameter: z.string().optional(),
 });
 
 export type JobHistoryDetail = z.infer<typeof jobHistoryDetailSchema>;

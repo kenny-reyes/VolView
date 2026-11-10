@@ -11,8 +11,10 @@ import { viteStaticCopy } from 'vite-plugin-static-copy';
 import { visualizer } from 'rollup-plugin-visualizer';
 import { sentryVitePlugin } from '@sentry/vite-plugin';
 import replace from '@rollup/plugin-replace';
+import VtkColorPresets from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction/ColorMaps.json.js';
 
 import { BASE_URL } from './tests/e2ePorts';
+import { LAYER_PRESET_OPTIONS } from './src/vtk/LayerColorPresets';
 
 function resolveNodeModulePath(moduleName: string) {
   const require = createRequire(import.meta.url);
@@ -31,6 +33,9 @@ function resolvePath(...args: string[]) {
 }
 
 const PLACEHOLDER_VERSION = '0.0.0';
+const sliceColorPresets = VtkColorPresets.filter(({ Name }: { Name: string }) =>
+  LAYER_PRESET_OPTIONS.some(({ value }) => value === Name)
+);
 
 function getPackageInfo() {
   const mainPkgPath = path.resolve(__dirname, 'package.json');
@@ -103,10 +108,35 @@ function configureSentryPlugin() {
     : ({} as Plugin);
 }
 
+// @mdi/font also lists eot, woff and ttf sources. Every supported browser
+// takes woff2, but the build would copy all four.
+function woff2IconFont(): Plugin {
+  return {
+    name: 'woff2-icon-font',
+    enforce: 'pre',
+    transform(code, id) {
+      if (!id.includes('@mdi/font/css/')) return null;
+      const woff2 = code.match(/url\([^)]*\.woff2[^)]*\)\s*format\("woff2"\)/);
+      const fontFace = /@font-face\{[^}]*\}/;
+      if (!woff2 || !fontFace.test(code)) {
+        return this.error('@mdi/font no longer declares its woff2 font face');
+      }
+      return code.replace(
+        fontFace,
+        `@font-face{font-family:"Material Design Icons";src:${woff2[0]};font-weight:normal;font-style:normal}`
+      );
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
   build: {
     outDir: distDir,
+    // An inlined font is downloaded with the render blocking stylesheet. As a
+    // file, a unicode-range subset is only fetched when the page needs it.
+    assetsInlineLimit: (filePath) =>
+      /\.(woff2?|ttf|eot)$/.test(filePath) ? false : undefined,
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -146,13 +176,14 @@ export default defineConfig({
     ],
   },
   plugins: [
+    woff2IconFont(),
     {
       name: 'virtual-modules',
       load(id) {
         if (id.includes('@kitware/vtk.js')) {
           if (id.includes('ColorMaps.json.js')) {
-            // We don't use the built-in colormaps
-            return 'export default [];';
+            // Bundle only the built-in palettes used by 2D overlays.
+            return `export default ${JSON.stringify(sliceColorPresets)};`;
           }
 
           // We don't use these classes

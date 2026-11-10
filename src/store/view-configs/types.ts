@@ -7,14 +7,15 @@ import {
 } from '@/src/types/views';
 import { WLAutoRanges } from '@/src/constants';
 
-export interface CameraConfig {
+export type CameraConfig = {
+  autoFit?: boolean;
   parallelScale?: number;
   position?: Vector3;
   focalPoint?: Vector3;
   directionOfProjection?: Vector3;
   viewUp?: Vector3;
   syncState?: boolean;
-}
+};
 
 export interface SliceConfig {
   slice: number;
@@ -34,6 +35,8 @@ export interface VolumeColorConfig {
 }
 
 export interface WindowLevelConfig {
+  preset?: string;
+  visibility?: boolean;
   width?: number;
   level?: number;
   auto: keyof typeof WLAutoRanges; // User-selected percentile range
@@ -41,20 +44,16 @@ export interface WindowLevelConfig {
   userTriggered?: boolean; // Whether the user has changed the window/level
 }
 
-export interface LayersConfig {
-  colorBy: {
-    arrayName: string;
-    location: string;
-  };
+export type LayersConfig = {
   transferFunction: ColorTransferFunction;
   opacityFunction: OpacityFunction;
   blendConfig: BlendConfig;
-}
+  transparentBackground: boolean;
+};
 
-export interface SegmentGroupConfig {
-  outlineOpacity: number;
-  outlineThickness: number;
-}
+export type LayerDisplayConfig = ColorTransferFunction &
+  Pick<BlendConfig, 'opacity' | 'visibility'> &
+  Pick<LayersConfig, 'transparentBackground'>;
 
 export interface CinePlaybackViewConfig {
   frame: number;

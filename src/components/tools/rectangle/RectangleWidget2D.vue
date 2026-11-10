@@ -17,7 +17,6 @@ import { LPSAxisDir } from '@/src/types/lps';
 import { onVTKEvent } from '@/src/composables/onVTKEvent';
 import { useRectangleStore } from '@/src/store/tools/rectangles';
 import vtkRectangleWidget, {
-  vtkRectangleViewWidget,
   InteractionState,
 } from '@/src/vtk/RectangleWidget';
 import RectangleSVG2D from '@/src/components/tools/rectangle/RectangleSVG2D.vue';
@@ -37,12 +36,11 @@ import { toolRenderSlice } from '@/src/core/annotations/locator';
 
 const useStore = useRectangleStore;
 const vtkWidgetFactory = vtkRectangleWidget;
-type WidgetView = vtkRectangleViewWidget;
 const SVG2DComponent = RectangleSVG2D;
 
 export default defineComponent({
   name: 'RectangleWidget2D',
-  emits: ['placed', 'contextmenu', 'widgetHover'],
+  emits: ['placing', 'placed', 'contextmenu', 'widgetHover'],
   props: {
     toolId: {
       type: String as unknown as PropType<ToolID>,
@@ -84,7 +82,7 @@ export default defineComponent({
       isPlaced: !isPlacing.value,
     });
 
-    const widget = view.widgetManager.addWidget(widgetFactory) as WidgetView;
+    const widget = view.widgetManager.addWidget(widgetFactory)!;
 
     onUnmounted(() => {
       view.widgetManager.removeWidget(widget);
@@ -109,6 +107,12 @@ export default defineComponent({
       }
     });
 
+    // While placing, the widget only starts an interaction when the first
+    // point lands: the states that would drag a handle are not reachable yet.
+    onVTKEvent(widget, 'onStartInteractionEvent', () => {
+      if (isPlacing.value) emit('placing');
+    });
+
     onVTKEvent(widget, 'onPlacedEvent', () => {
       emit('placed');
     });
@@ -123,6 +127,7 @@ export default defineComponent({
 
     const manipulator = vtkPlaneManipulator.newInstance();
     widget.setManipulator(manipulator);
+    onUnmounted(() => manipulator.delete());
 
     watchEffect(() => {
       updatePlaneManipulatorFor2DView(
@@ -159,6 +164,7 @@ export default defineComponent({
     return {
       tool,
       slice,
+      appearance: computed(() => toolStore.appearanceOfTool(toolId.value)),
       firstPoint: computed(() => {
         return visibleStates.firstPoint ? tool.value?.firstPoint : undefined;
       }),
@@ -176,8 +182,8 @@ export default defineComponent({
     :view-id="viewId"
     :point1="firstPoint"
     :point2="secondPoint"
-    :color="tool.color"
-    :stroke-width="tool.strokeWidth"
+    :color="appearance.cssColor"
+    :stroke-width="appearance.strokeWidth"
     :fill-color="tool.fillColor"
   />
 </template>

@@ -15,6 +15,7 @@ import {
   jobHistoryDetailSchema,
   jobResultsSchema,
   jobResultsErrorSchema,
+  currentResultIntentName,
 } from '../wire';
 import { loadFixture, loadFixtureDir } from './loadFixtures';
 
@@ -193,13 +194,28 @@ describe('neutral job status fixtures', () => {
 // Result intents
 // ---------------------------------------------------------------------------
 
+describe('currentResultIntentName', () => {
+  it('reads the earlier segmentation import name as the current one', () => {
+    expect(currentResultIntentName('add-segment-group')).toBe(
+      'import-segmentation'
+    );
+  });
+
+  it.each(['toString', 'constructor', '__proto__', 'add-mesh'])(
+    'passes %s through unchanged',
+    (intent) => {
+      expect(currentResultIntentName(intent)).toBe(intent);
+    }
+  );
+});
+
 describe('result intent fixtures', () => {
-  it('exports vocabulary version 2 and the exactly-four state intents', () => {
-    expect(INTENT_VOCABULARY_VERSION).toBe(2);
+  it('exports vocabulary version 3 and the exactly-four state intents', () => {
+    expect(INTENT_VOCABULARY_VERSION).toBe(3);
     expect([...RESULT_INTENTS]).toEqual([
       'add-base-image',
       'add-layer',
-      'add-segment-group',
+      'import-segmentation',
       'add-annotations',
     ]);
     expect(wire).not.toHaveProperty('intent.download');
@@ -208,8 +224,8 @@ describe('result intent fixtures', () => {
   it.each([
     'intent.add-base-image',
     'intent.add-layer',
-    'intent.add-segment-group.with-segments',
-    'intent.add-segment-group.embedded',
+    'intent.import-segmentation.with-segments',
+    'intent.import-segmentation.embedded',
     'intent.add-annotations',
     'intent.unknown',
   ])('validates %s', (name) => {
@@ -253,11 +269,11 @@ describe('result intent fixtures', () => {
     ).toBe(false);
   });
 
-  it('parses add-segment-group WITH segments and a source provenance tag', () => {
+  it('parses import-segmentation WITH segments and a source provenance tag', () => {
     const parsed = resultIntentSchema.parse(
-      wire['intent.add-segment-group.with-segments']
+      wire['intent.import-segmentation.with-segments']
     ) as Record<string, unknown>;
-    expect(parsed.intent).toBe('add-segment-group');
+    expect(parsed.intent).toBe('import-segmentation');
     expect(Array.isArray(parsed.segments)).toBe(true);
     expect(parsed.source).toEqual({
       providerId: 'analysis-provider',
@@ -266,18 +282,18 @@ describe('result intent fixtures', () => {
     });
   });
 
-  it('parses add-segment-group WITHOUT segments (embedded metadata) but with source', () => {
+  it('parses import-segmentation WITHOUT segments (embedded metadata) but with source', () => {
     const parsed = resultIntentSchema.parse(
-      wire['intent.add-segment-group.embedded']
+      wire['intent.import-segmentation.embedded']
     ) as Record<string, unknown>;
-    expect(parsed.intent).toBe('add-segment-group');
+    expect(parsed.intent).toBe('import-segmentation');
     expect(parsed.segments).toBeUndefined();
     expect(parsed.source).toMatchObject({ outputId: 'outputLabelmap' });
   });
 
-  it('rejects a segment-group source without provider identity', () => {
+  it('rejects a segmentation source without provider identity', () => {
     const value = structuredClone(
-      wire['intent.add-segment-group.with-segments']
+      wire['intent.import-segmentation.with-segments']
     ) as { source: { providerId?: string } };
     delete value.source.providerId;
     expect(knownResultIntentSchema.safeParse(value).success).toBe(false);
@@ -364,16 +380,14 @@ describe('result intent fixtures', () => {
   });
 
   it('rejects a wrong-length segment color (the tuple-length parity pin)', () => {
-    // The negative fixture carries a 3-element color. The STRICT union must
-    // reject it — and the generated JSON Schema must agree (backend side:
-    // test_contract_fixtures.py), so both validators close fixed-length
-    // tuples identically. The full union still accepts the row, demoted to an
-    // ordinary result with no state action (the designed fail-open).
+    // Only the strict known-intent union rejects the 3-element color; the
+    // published result-intent schema accepts the row and demotes it to an
+    // ordinary result with no state action.
     const short = loadFixture('negative/wrong-length-color.json');
     expect(knownResultIntentSchema.safeParse(short).success).toBe(false);
     expect(resultIntentSchema.safeParse(short).success).toBe(true);
 
-    const good = wire['intent.add-segment-group.with-segments'] as {
+    const good = wire['intent.import-segmentation.with-segments'] as {
       segments: { color: number[] }[];
     };
     const long = structuredClone(good);

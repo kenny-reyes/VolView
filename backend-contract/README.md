@@ -60,7 +60,11 @@ validate `annotations-file.schema.json`, then enforce
 `validateAnnotationsFileSemantics` — every nonempty `labelName` must be declared
 in its own tool-kind label namespace, which JSON Schema cannot express either.
 Backend conformance tests must also assert that every payload under
-`fixtures/negative/` is rejected by the combined validation path.
+`fixtures/negative/` is rejected by the combined validation path. The one
+exception is `negative/wrong-length-color.json`, which only the strict
+known-intent union rejects: `result-intent.schema.json` is deliberately open,
+so it accepts the row and demotes it to an ordinary result carrying no state
+action.
 
 ## The neutral REST surface (OpenAPI)
 
@@ -105,9 +109,28 @@ Two versions on separate clocks:
 - **Artifact version**: `package.json` `version` and the OpenAPI
   `info.version`, kept in lockstep by `processing/__tests__/openapi.spec.ts`.
   Versions this package as a published thing.
-- **Shape versions**: `INTENT_VOCABULARY_VERSION` (`processing/wire.ts`) and
-  the task-spec `specVersion`. These version the wire vocabulary for additive
-  compatibility negotiation.
+- **Shape versions**: `INTENT_VOCABULARY_VERSION` (`processing/wire.ts`) names
+  the shape of the result intent vocabulary in the generated OpenAPI
+  description and in release notes. It never travels on the wire, so adding an
+  intent rests on both sides failing open on a name they do not know. The
+  task-spec `specVersion` does travel: every task spec carries it, and a client
+  rejects a spec whose version it does not know. Bump it only on a shape
+  change, never for a new optional field.
+
+### Result instruction rollout
+
+Contract artifact 0.3.0 uses intent vocabulary 3 and names segmentation import
+`import-segmentation`. A current client still reads the earlier name,
+`add-segment-group`, as the same instruction (`LEGACY_RESULT_INTENT_NAMES` in
+`processing/wire.ts`), so a producer may move to the new name after the client.
+The reverse order does not hold: an older client treats `import-segmentation`
+as an ordinary result and will not apply its segmentation automatically.
+Update Girder's pinned VolView package before the producer emits the new name.
+
+This vocabulary change does not change task-spec versions or saved-session
+schemas. Girder projects stored job outputs into current instructions when
+results are requested; stored output references and mask provenance keep their
+identities.
 
 ## Regenerating
 

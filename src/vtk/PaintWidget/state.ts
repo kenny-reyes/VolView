@@ -1,6 +1,8 @@
 import { IBrushStencil } from '@/src/core/tools/paint/brush';
 import type { Vector3 } from '@kitware/vtk.js/types';
-import vtkStateBuilder from '@kitware/vtk.js/Widgets/Core/StateBuilder';
+import vtkStateBuilder, {
+  vtkRootWidgetState,
+} from '@kitware/vtk.js/Widgets/Core/StateBuilder';
 import vtkWidgetState from '@kitware/vtk.js/Widgets/Core/WidgetState';
 
 export interface PaintPointWidgetState extends vtkWidgetState {
@@ -10,11 +12,11 @@ export interface PaintPointWidgetState extends vtkWidgetState {
   getScale1(): number;
   setVisible(visible: boolean): boolean;
   getVisible(): boolean;
-  setColor(color: number): boolean;
-  getColor(): number;
+  setColor3(color: Vector3): boolean;
+  getColor3(): Vector3;
 }
 
-export interface PaintWidgetState extends vtkWidgetState {
+export interface PaintWidgetState extends vtkRootWidgetState {
   getBrush(): PaintPointWidgetState;
   getStencil(): IBrushStencil;
   setStencil(stencil: IBrushStencil): boolean;
@@ -26,7 +28,7 @@ export default function generateState() {
     .addStateFromMixin({
       labels: ['brush'],
       name: 'brush',
-      mixins: ['origin', 'scale1', 'visible', 'color'],
+      mixins: ['origin', 'scale1', 'visible', 'color3'],
       initialValues: {
         scale1: 1,
         origin: null,

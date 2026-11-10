@@ -64,10 +64,10 @@ To layer images:
 
 1. Load the base image.
 1. On the Data tab, click the Add Layer button on the upper layer dataset.
-1. Under the Rendering tab, an opacity slider changes the transparency of the upper layer.
+1. Under the Rendering tab, open Layers to adjust the overlay color map, display range, opacity, and transparent background.
 
 ![Add Layer](./assets/add-layer.jpg)
 
 ## State Files
 
-Load preconfigured scenes with annotations, segment groups, and view settings via [state files](./state_files.md). State files can embed data (`*.volview.zip`) or reference remote data via URIs (`*.volview.json`).
+Load preconfigured scenes with annotations, segmentations, and view settings via [state files](./state_files.md). State files can embed data (`*.volview.zip`) or reference remote data via URIs (`*.volview.json`).

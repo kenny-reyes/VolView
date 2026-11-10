@@ -90,6 +90,7 @@
               :source-ref-states="sourceRefStates"
               :source-ref-names="sourceRefNames"
               :source-ref-types="sourceRefTypes"
+              :source-ref-warnings="inputWarnings"
               :submitting="submitting"
               @update:values="onValuesUpdate"
               @submit="onSubmit"
@@ -120,6 +121,7 @@ import { getErrorDetail, ensureError } from '@/src/utils';
 
 import { useProcessingJobsStore } from '@/src/processing/store';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
+import { useMaskRevision } from '@/src/segmentation/composables/useMaskRevision';
 import { useImageCacheStore } from '@/src/store/image-cache';
 import { useCropStore } from '@/src/store/tools/crop';
 import type {
@@ -134,7 +136,10 @@ import {
   type TaskFormModel,
   type FormValidationIssue,
 } from '@/src/processing/engine/formModel';
-import { type SourceRefBindingState } from '@/src/processing/engine/mintInput';
+import {
+  mintInputValue,
+  type SourceRefBindingState,
+} from '@/src/processing/engine/mintInput';
 import {
   bindSourceRefs,
   type BoundSourceRefType,
@@ -147,8 +152,10 @@ import {
 } from '@/src/processing/engine/jobDisplay';
 import { cropPlanesToWorldBounds } from '@/src/processing/engine/bounds';
 import { useInputStaging } from '@/src/processing/composables/useInputStaging';
-import { usePaintToolStore } from '@/src/store/tools/paint';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { planSegmentationInput } from '@/src/processing/segmentationInput';
+import { useSegmentationStore } from '@/src/segmentation/store';
+import { segmentationHasContent } from '@/src/segmentation/model';
+import { useSegmentStore } from '@/src/segmentation/segments';
 import { useMessageStore } from '@/src/store/messages';
 
 import TaskPicker from './TaskPicker.vue';
@@ -159,8 +166,7 @@ const providers = useProcessingJobsStore();
 const { currentImageID } = useCurrentImage('global');
 const imageCache = useImageCacheStore();
 const cropStore = useCropStore();
-const paintStore = usePaintToolStore();
-const segmentGroupStore = useSegmentGroupStore();
+const segmentationStore = useSegmentationStore();
 const messageStore = useMessageStore();
 
 const {
@@ -347,7 +353,7 @@ async function onSubmit(values: Record<string, ProcessingValue>) {
     currentValues.value = finalValues;
     return;
   }
-  // Display formatting reads live active image and segment-group state, so it
+  // Display formatting reads live active image and segmentation state, so it
   // must render before the staging await.
   const display = buildJobDisplay(
     model,
@@ -384,7 +390,7 @@ async function onSubmit(values: Record<string, ProcessingValue>) {
   let staged: Record<string, ProcessingValue>[];
   try {
     staged = await Promise.all([
-      stage('Failed to stage segment group input', () =>
+      stage('Failed to stage segmentation input', () =>
         stageLabelmapInputs(submitProvider, bindings)
       ),
       stage('Failed to stage annotations input', () =>
@@ -493,21 +499,68 @@ function refreshValidation(
 }
 
 // Resolved once per display pass: each binding re-runs a full field scan and
-// group resolution, so per-field resolution would redo identical work.
+// provenance walk, so per-field resolution would redo identical work.
 function jobDisplayContext(bindings: SourceRefBindings): JobDisplayContext {
   const labelmapNames = Object.fromEntries(
-    Object.entries(bindings.labelmap.groups).map(([parameterId, groupIds]) => [
-      parameterId,
-      groupIds.map((groupId) => segmentGroupStore.metadataByID[groupId].name),
-    ])
+    Object.entries(bindings.labelmap.segmentations).map(
+      ([parameterId, { segmentationId }]) => [
+        parameterId,
+        segmentationStore.segmentations[segmentationId].name,
+      ]
+    )
   );
   return {
     labelmapNames,
     types: bindings.types,
     imageName: activeImageName(),
+    imageNames: bindings.image.names ?? {},
     annotationCount: finishedAnnotationCount.value,
   };
 }
+
+// Scanning masks is expensive, so refresh input notices outside render tracking.
+const inputWarnings = ref<Record<string, string>>({});
+const maskRevision = useMaskRevision(() => currentImageID.value);
+const segmentRegistry = useSegmentStore().segments;
+
+const refreshInputWarnings = () => {
+  const model = taskModel.value;
+  const bound = model
+    ? Object.entries(activeSourceBindings(model).labelmap.segmentations)
+    : [];
+  inputWarnings.value = Object.fromEntries(
+    bound
+      // Only a single-labelmap input can omit segments, and planning costs a
+      // voxel sweep.
+      .filter(([, { multiple }]) => !multiple)
+      .flatMap(([parameterId, { segmentationId }]) => {
+        const { warning } = planSegmentationInput(segmentationId, false);
+        return warning ? [[parameterId, warning] as const] : [];
+      })
+  );
+};
+
+// Voxel writes bump the revision; membership covers masks arriving or leaving.
+const overlapSignal = () => {
+  const imageId = currentImageID.value;
+  return [
+    imageId,
+    maskRevision.value,
+    segmentRegistry.selectedSegmentId.value,
+    // The first or last finished tool can move a union input off the labelmap.
+    finishedAnnotationCount.value > 0,
+    segmentRegistry.segmentList.value
+      .map(({ id, name }) => `${id}:${name}`)
+      .join(),
+    imageId
+      ? segmentationStore.getSegmentationForImage(imageId)?.order.join()
+      : undefined,
+  ].join('|');
+};
+
+watch(taskModel, refreshInputWarnings);
+// A stroke bumps the revision per sample, and each answer costs a voxel sweep.
+watchDebounced(overlapSignal, refreshInputWarnings, { debounce: 150 });
 
 const sourceRefNames = computed(() => {
   const model = taskModel.value;
@@ -523,14 +576,20 @@ const sourceRefNames = computed(() => {
 watchDebounced(
   () => {
     const id = currentImageID.value;
+    const segmentation = id
+      ? segmentationStore.getSegmentationForImage(id)
+      : undefined;
     return {
       id,
       crop: id ? cropStore.croppingByImageID[id] : undefined,
-      activeSegmentGroup: paintStore.activeSegmentGroupID,
-      groupCount: id ? (segmentGroupStore.orderByParent[id]?.length ?? 0) : 0,
+      segmentationId: segmentation?.id,
+      hasContent: !!segmentation && segmentationHasContent(segmentation),
       // Placing the first (or removing the last) tool flips the annotations
       // binding, so the form must revalidate.
       annotationCount: finishedAnnotationCount.value,
+      imageLayers: sourceRefContext().imageLayers?.map(({ dataSource }) =>
+        mintInputValue(dataSource)
+      ),
     };
   },
   () => {

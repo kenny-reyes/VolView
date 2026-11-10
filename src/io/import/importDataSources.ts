@@ -122,9 +122,25 @@ async function importDicomChunkSources(sources: ChunkSource[]) {
 
 type ImportPolicy = 'application' | 'volume-data';
 
+/**
+ * The two halves of a state-file restore: the handler that reads the manifest
+ * out of the pipeline, and the step that applies it once the bases have
+ * loaded.
+ */
+export type RestoreProcessors = {
+  restoreStateFile: typeof restoreStateFile;
+  completeStateFileRestore: typeof completeStateFileRestore;
+};
+
+export const appRestoreProcessors = (): RestoreProcessors => ({
+  restoreStateFile,
+  completeStateFileRestore,
+});
+
 async function importDataSourcesWithPolicy(
   dataSources: DataSource[],
-  policy: ImportPolicy
+  policy: ImportPolicy,
+  restore: RestoreProcessors = appRestoreProcessors()
 ): Promise<ImportDataSourcesResult[]> {
   const cleanupHandlers: Array<() => void> = [];
   const onCleanup = (fn: () => void) => {
@@ -138,12 +154,13 @@ async function importDataSourcesWithPolicy(
     fetchFileCache: new Map<string, File>(),
     onCleanup,
     importDataSources: (sources: DataSource[]) =>
-      importDataSourcesWithPolicy(sources, policy),
+      importDataSourcesWithPolicy(sources, policy, restore),
   };
 
+  // State files first: a manifest's top-level `segments` is also a config key.
   const applicationHandlers =
     policy === 'application'
-      ? [handleConfig, restoreStateFile, handleRemoteManifest]
+      ? [restore.restoreStateFile, handleConfig, handleRemoteManifest]
       : [];
 
   const handlers = [
@@ -227,8 +244,6 @@ async function importDataSourcesWithPolicy(
 
   cleanup();
 
-  results.push(...applyConfigsPostState(configResults));
-
   const dicomChunkSources = chunkSources.filter(
     (src): src is ChunkSource =>
       src.type === 'chunk' && src.mime === FILE_EXT_TO_MIME.dcm
@@ -269,7 +284,7 @@ async function importDataSourcesWithPolicy(
   const reportedStateIDs = new Set<string>();
   for (const setup of stateFileSetups) {
     try {
-      await completeStateFileRestore(
+      await restore.completeStateFileRestore(
         setup.manifest,
         setup.stateFiles,
         stateIDToStoreID,
@@ -298,6 +313,8 @@ async function importDataSourcesWithPolicy(
     }
   }
 
+  results.push(...applyConfigsPostState(configResults));
+
   // A failed state-file leaf is already counted in the restore's consolidated
   // missing-content notice, so this layer owns its reporting: it returns as an
   // accounted-for 'ok' result, never as an error. An 'error' result in the
@@ -315,9 +332,10 @@ async function importDataSourcesWithPolicy(
 }
 
 export function importDataSources(
-  dataSources: DataSource[]
+  dataSources: DataSource[],
+  restore: RestoreProcessors = appRestoreProcessors()
 ): Promise<ImportDataSourcesResult[]> {
-  return importDataSourcesWithPolicy(dataSources, 'application');
+  return importDataSourcesWithPolicy(dataSources, 'application', restore);
 }
 
 export function importVolumeDataSources(

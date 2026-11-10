@@ -1,4 +1,4 @@
-import { COLOR3D_JPEG_BASELINE_DICOM } from './configTestUtils';
+import { COLOR3D_JPEG_BASELINE_DICOM } from '../datasets';
 import { openUrls } from './utils';
 
 const VIEW_SELECTOR = 'div[data-testid="vtk-view vtk-cine-view"]';
@@ -12,7 +12,6 @@ async function captureBrowserConsoleLogsDuring(action: () => Promise<void>) {
     logs.push(entry);
   };
 
-  await (browser as any).sessionSubscribe({ events: ['log.entryAdded'] });
   browser.on('log.entryAdded', handler);
 
   try {

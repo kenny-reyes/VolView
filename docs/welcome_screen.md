@@ -8,7 +8,7 @@
 
 Information on the Patient data and non-DICOM data that have been loaded. The currently display image data is highlighted in blue.
 
-**Sample Data** presents a variety of DICOM data that can be used to quickly explore the capabilities of VolView. When you select a sample dataset, that data is downloaded from [http://data.kitware.com/](https://data.kitware.com/#collection/586fef9f8d777f05f44a5c86/folder/634713cf11dab81428208e1e).
+**Sample Data** presents a variety of DICOM data that can be used to quickly explore the capabilities of VolView. When you select a sample dataset, that data is downloaded from [http://data.kitware.com/](https://data.kitware.com/#collection/586fef9f8d777f05f44a5c86/folder/634713cf11dab81428208e1e). The PET/CT Chest sample opens a PET overlay on CT for trying the [layer display controls](./rendering.md).
 
 ### Annotations
 
@@ -16,7 +16,7 @@ Lists the ruler and other measures that have been made on the currently loaded d
 
 ### Rendering
 
-Controls for the 3D cinematic volume rendering.
+Controls for 3D cinematic rendering and 2D image layers. See [Rendering](./rendering.md) for details.
 
 ## Load / Save State
 

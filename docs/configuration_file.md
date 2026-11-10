@@ -4,7 +4,7 @@ By loading a JSON file, you can set VolView's configuration:
 
 - View layouts (grid size, view types, or hierarchical layouts)
 - Disabled view types
-- Labels for tools
+- Segments
 - Visibility of Sample Data section
 - Keyboard shortcuts
 
@@ -149,66 +149,129 @@ Use `disabledViewTypes` to prevent certain view types from being available in th
 
 This removes the specified view types from the dropdown menu and replaces them in the default layout with allowed types. Valid values: `"2D"`, `"3D"`, `"Oblique"`
 
-## Labels for tools
+## Segments
 
-Each tool type (Rectangle, Polygon, etc.) can have tool specific labels. To share labels
-across tools, define the `defaultLabels` key and don't provide labels for a tool that
-should use the default labels.
+Paint, rectangles, polygons and rulers share one registry of segments, configured under
+`segments`. Each entry is keyed by name, and every appearance field is optional: an
+omitted one means the app default for a new segment. For an existing session segment,
+omitted fields keep the appearance it had before configuration. Replacing a config entry
+removes its previous appearance overrides, including color, while keeping the segment id,
+visibility and lock state.
 
 ```json
 {
-  "labels": {
-    "defaultLabels": {
-      "lesion": { "color": "#ff0000" },
-      "tumor": { "color": "green", "strokeWidth": 3 }
-    }
+  "segments": {
+    "lesion": { "color": "#ff0000" },
+    "tumor": { "color": "green", "strokeWidth": 3, "fillOpacity": 0.5 }
   }
 }
 ```
 
-## Segment Group File Format
+Fields:
 
-The `segmentGroupSaveFormat` key specifies the file extension of the segment group images
+- `color` takes a hex value of 3, 4, 6 or 8 digits such as `#ff0000` (the 4 and 8 digit
+  forms carry alpha) or a CSS color keyword such as `green`. Any other value is reported
+  as an error and ignored.
+- `fillOpacity` and `outlineOpacity`, from 0 to 1, set how strongly the segment's masks
+  are filled and outlined. The Display sliders in "Annotations" scale them per image.
+- `strokeWidth` sets the line width of the segment's rectangles, polygons and rulers.
+
+Omitting the key leaves the registry alone. An empty record (`{}`) or `null` drops the
+config's entries: a segment the config created is deleted unless a mask or shape
+references it, and any other segment stays with its last configured appearance.
+
+Entries are keyed by name. A configured segment keeps its id while its key stays the
+same, so recoloring it never detaches its masks and shapes. Changing a key moves the
+entry to the segment of the new name, adding one if none exists, and drops the old entry
+as above. Applying a config again restores each key's name and configured appearance,
+undoing a rename made in the app.
+
+Configured segments outlive the images. Removing the last image deletes every other
+segment and keeps these.
+
+### Legacy `labels`
+
+A legacy `labels` section is converted into `segments` at configuration ingestion, with
+a deprecation warning. Runtime configuration contains only `segments`. Its
+`defaultLabels`, `rulerLabels`, `rectangleLabels` and `polygonLabels` all describe the one
+registry now, so they read as `segments` entries. A name that appears in more than one
+becomes a single segment: the first record to declare it sets its appearance, reading
+`rulerLabels`, `rectangleLabels` and `polygonLabels` in that order and `defaultLabels`
+last. `defaultLabels` stood in for the tools that declared no record of their own, so it
+is read only when at least one of the three tool records is omitted. A section whose
+records are all omitted or `null` leaves the registry alone. A rectangle label's
+`fillColor` is dropped with a warning, since fill color is a property of the rectangle
+rather than of the segment. A config carrying both `segments` and `labels` has been
+converted already, so `segments` is read, `labels` is ignored, and the warning says so.
+
+Converting a config by hand:
+
+```json
+{
+  "labels": {
+    "defaultLabels": { "lesion": { "color": "#ff0000" } },
+    "rulerLabels": { "big": { "color": "#ff0000" } }
+  }
+}
+```
+
+becomes, with the segments in the order VolView reads them:
+
+```json
+{
+  "segments": {
+    "big": { "color": "#ff0000" },
+    "lesion": { "color": "#ff0000" }
+  }
+}
+```
+
+## Session Mask File Format
+
+The `segmentationSaveFormat` key specifies the file extension of the mask images
 VolView will include in the volview.zip file.
 
 ```json
 {
   "io": {
-    "segmentGroupSaveFormat": "nii"
+    "segmentationSaveFormat": "nii"
   }
 }
 ```
 
-Working segment group file formats:
+This setting controls mask files inside saved sessions, independently of the
+explicit segmentation export dialog.
+
+Working mask file formats:
 
 hdf5, iwi.cbor, mha, nii, nii.gz, nrrd, vtk
 
-## Automatic Layers and Segment Groups by File Name
+## Automatic Layers and Segmentations by File Name
 
 When loading multiple files, VolView can automatically associate related images based on file naming patterns.
 Example: `base.[extension].nrrd` will match `base.nii`.
 
 The extension must appear anywhere in the filename after splitting by dots, and the filename must start with the same prefix as the base image (everything before the first dot). Files matching `base.[extension]...` will be associated with a base image named `base.*`.
 
-**Ordering:** When multiple layers/segment groups match a base image, they are sorted alphabetically by filename and added to the stack in that order. To control the stacking order explicitly, you could use numeric prefixes in your filenames.
+**Ordering:** When multiple layers match a base image, they are sorted alphabetically by filename and added to the stack in that order. To control the stacking order explicitly, you could use numeric prefixes in your filenames. Matching segmentation files each add their labels as segments to the base image's one segmentation.
 
 For example, with a base image `patient001.nrrd`:
 
 - Layers (sorted alphabetically): `patient001.layer.1.pet.nii`, `patient001.layer.2.ct.mha`, `patient001.layer.3.overlay.vtk`
-- Segment groups: `patient001.seg.1.tumor.nii.gz`, `patient001.seg.2.lesion.mha`
+- Segmentations: `patient001.seg.1.tumor.nii.gz`, `patient001.seg.2.lesion.mha`
 
 Both features default to `''` which disables them.
 
-### Segment Groups
+### Segmentations
 
-Use `segmentGroupExtension` to automatically convert matching non-DICOM images to segment groups.
-For example, `myFile.seg.nrrd` becomes a segment group for `myFile.nii`.
+Use `segmentationExtension` to automatically import the labels of matching non-DICOM images as segments.
+For example, `myFile.seg.nrrd` adds its labels as segments on `myFile.nii`.
 Defaults to `''` which disables matching.
 
 ```json
 {
   "io": {
-    "segmentGroupExtension": "seg"
+    "segmentationExtension": "seg"
   }
 }
 ```
@@ -226,9 +289,16 @@ Defaults to `''` which disables matching.
 }
 ```
 
+## Renamed `io` Keys
+
+The keys `io.segmentGroupExtension` and `io.segmentGroupSaveFormat` are still read,
+converted to `io.segmentationExtension` and `io.segmentationSaveFormat`, and reported
+with a deprecation warning. If both spellings of a key are present, their values must
+match or the configuration is rejected.
+
 ## Keyboard Shortcuts
 
-Configure the keys to activate tools, change selected labels, and more.
+Configure the keys to activate tools, change the selected segment, and more.
 All [shortcut actions](https://github.com/Kitware/VolView/blob/main/src/constants.ts#L53) are under the `ACTIONS` variable.
 
 To configure a key for an action, add its action name and the key(s) under the `shortcuts` section. For key combinations, use `+` like `Ctrl+f`.
@@ -246,11 +316,9 @@ To configure a key for an action, add its action name and the key(s) under the `
 
 ```json
 {
-  "labels": {
-    "defaultLabels": {
-      "lesion": { "color": "#ff0000" },
-      "tumor": { "color": "green", "strokeWidth": 3 }
-    }
+  "segments": {
+    "lesion": { "color": "#ff0000" },
+    "tumor": { "color": "green", "strokeWidth": 3 }
   },
   "layouts": {
     "single-view": {
@@ -264,28 +332,10 @@ To configure a key for an action, add its action name and the key(s) under the `
 
 ```json
 {
-  "labels": {
-    "defaultLabels": {
-      "lesion": { "color": "#ff0000" },
-      "tumor": { "color": "green", "strokeWidth": 3 },
-      "innocuous": { "color": "white" }
-    },
-    "rulerLabels": {
-      "big": { "color": "#ff0000" },
-      "small": { "color": "white" }
-    },
-    "rectangleLabels": {
-      "red": { "color": "#ff0000", "fillColor": "transparent" },
-      "green": { "color": "green", "fillColor": "transparent" },
-      "white-yellow-fill": {
-        "color": "white",
-        "fillColor": "#00ff0030"
-      }
-    },
-    "polygonLabels": {
-      "poly1": { "color": "#ff0000" },
-      "poly2Label": { "color": "green" }
-    }
+  "segments": {
+    "lesion": { "color": "#ff0000" },
+    "tumor": { "color": "green", "strokeWidth": 3, "fillOpacity": 0.5 },
+    "innocuous": { "color": "white", "outlineOpacity": 0.8 }
   },
   "layouts": {
     "Volume primary": {
@@ -312,8 +362,8 @@ To configure a key for an action, add its action name and the key(s) under the `
     "showKeyboardShortcuts": "t"
   },
   "io": {
-    "segmentGroupSaveFormat": "nrrd",
-    "segmentGroupExtension": "seg",
+    "segmentationSaveFormat": "nrrd",
+    "segmentationExtension": "seg",
     "layerExtension": "layer"
   }
 }

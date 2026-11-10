@@ -251,15 +251,17 @@ export const useDatasetStore = defineStore('dataset', () => {
   const remove = (id: string | null) => {
     if (!id) return;
     // Prune the provenance entry too, or `serialize` re-emits the removed
-    // dataset (e.g. the temp dataset a segment group consumed at restore) as a
+    // dataset (e.g. the temp dataset a segmentation consumed at restore) as a
     // dangling manifest entry that a later restore fetches as a visible
     // Anonymous volume.
     loadedData.value = loadedData.value.filter((d) => d.dataID !== id);
     dicomStore.deleteVolume(id);
-    imageStore.deleteData(id);
     layersStore.remove(id);
     useViewConfigStore().removeData(id);
     useImageStatsStore().removeData(id);
+    // Cache eviction disposes the VTK object after Vue has flushed consumers.
+    // Run every other synchronous reference cleanup before starting eviction.
+    imageStore.deleteData(id);
   };
 
   const removeAll = () => {

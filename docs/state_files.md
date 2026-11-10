@@ -1,69 +1,17 @@
 # State Files
 
-VolView state files save your scene configuration: annotations, camera positions, colormaps, layouts, and more. There are two formats:
+State files save your scene so you can return to your work later or share it with others. They preserve annotations, segmentations, camera positions, colormaps, layouts, and other view settings.
 
-## Zip State Files (`*.volview.zip`)
+## Saving a Scene
 
-Save by clicking the "Disk" icon in the toolbar. This embeds your image data that was loaded from local files alongside the application state. Useful for sharing annotations with collaborators.
+Click the **Save** (disk) icon in the toolbar to download a `*.volview.zip` file. Images loaded from local files are included alongside the saved scene.
 
-## Sparse Manifest Files (`*.volview.json`)
+## Linked State Files
 
-JSON files that reference remote data via URIs instead of embedding it. Useful for:
+A `*.volview.json` file references data hosted on a server instead of including it in the file. This lets workflows and external applications open a prepared scene without copying large datasets. Anyone opening the scene needs access to the referenced data.
 
-- Linking to data hosted on servers
-- Sharing annotations without duplicating large datasets
-- Integrating with external systems (AI pipelines, access control, etc.)
+## Loading a Saved Scene
 
-Example manifest:
-
-```json
-{
-  "version": "6.2.0",
-  "dataSources": [
-    { "id": 0, "type": "uri", "uri": "https://example.com/scan.zip" },
-    { "id": 1, "type": "uri", "uri": "https://example.com/segmentation.nii.gz" }
-  ],
-  "segmentGroups": [
-    {
-      "id": "seg-1",
-      "dataSourceId": 1,
-      "metadata": {
-        "name": "Tumor Segmentation",
-        "parentImage": "0",
-        "segments": {
-          "order": [1],
-          "byValue": {
-            "1": { "value": 1, "name": "Tumor", "color": [255, 0, 0, 255] }
-          }
-        }
-      }
-    }
-  ],
-  "tools": {
-    "rectangles": {
-      "tools": [
-        {
-          "imageID": "0",
-          "frameOfReference": {
-            "planeNormal": [0, 0, 1],
-            "planeOrigin": [0, 0, 50]
-          },
-          "slice": 50,
-          "firstPoint": [-20, -20, 50],
-          "secondPoint": [20, 20, 50],
-          "label": "lesion"
-        }
-      ],
-      "labels": {
-        "lesion": { "color": "red" }
-      }
-    }
-  }
-}
-```
-
-## Loading State Files
-
-- **Drag and drop** onto VolView
-- **File browser** via the "Folder" icon below the save button
-- **URL parameter**: `?urls=[https://example.com/session.volview.json]`
+- Drag and drop a state file onto VolView.
+- Click the **Load** (folder) icon in the toolbar and select a state file.
+- Open a link that includes a state file in the `urls` parameter, such as `?urls=[https://example.com/session.volview.json]`.

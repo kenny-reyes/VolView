@@ -37,6 +37,17 @@ interface State {
   msgList: string[];
 }
 
+// The reporter reads application state that an error may have just corrupted,
+// and it runs before the message exists, so a throw here costs the user the
+// message itself.
+function describeBug(error?: Error) {
+  try {
+    return generateBugReport(error);
+  } catch {
+    return 'Bug report unavailable';
+  }
+}
+
 export const useMessageStore = defineStore('message', {
   state: (): State => ({
     _nextID: 1,
@@ -60,7 +71,7 @@ export const useMessageStore = defineStore('message', {
         {
           type: MessageType.Error,
           title,
-          bugReport: generateBugReport(opts?.error),
+          bugReport: describeBug(opts?.error),
         },
         {
           details: opts?.details ?? opts?.error?.stack,
@@ -139,3 +150,12 @@ export const useMessageStore = defineStore('message', {
     },
   },
 });
+
+/**
+ * Reports a warning both to the console and to the user. addWarning does not
+ * log on its own, unlike addError, so the two go together.
+ */
+export const surfaceWarning = (title: string, message: string) => {
+  console.warn(message);
+  useMessageStore().addWarning(title, message);
+};

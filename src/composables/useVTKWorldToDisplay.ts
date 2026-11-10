@@ -48,9 +48,9 @@ export function useVTKMultiWorldToDisplay(
   const displayCoords = ref<Vector2[]>([]);
   const view = computed(
     () =>
-      unref(renderer)
-        ?.getRenderWindow()
-        ?.getViews()?.[0] as vtkOpenGLRenderWindow
+      unref(renderer)?.getRenderWindow()?.getViews()?.[0] as unknown as
+        | vtkOpenGLRenderWindow
+        | undefined
   );
   const container = useVTKViewContainer(view);
 
@@ -69,7 +69,7 @@ export function useVTKMultiWorldToDisplay(
         disp[0] / devicePixelRatio,
         disp[1] / devicePixelRatio,
       ] as Vector2;
-    }) as Vector2[];
+    });
   };
 
   const camera = computed(() => unref(renderer)?.getActiveCamera());

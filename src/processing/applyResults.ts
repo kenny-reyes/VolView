@@ -1,10 +1,11 @@
 import {
   ANNOTATION_TOOL_KINDS,
+  RESULT_INTENTS,
+  currentResultIntentName,
   type AnnotationLabel,
   type AnnotationToolKind,
   type KnownResultIntent,
   type ResultSource,
-  type SegmentDescriptor,
   type WirePolygon,
   type WireRuler,
 } from '@/backend-contract';
@@ -28,19 +29,25 @@ import {
 } from '@/src/io/import/importDataSources';
 import { isVolumeResult } from '@/src/io/import/common';
 import type { ImageMetadata } from '@/src/types/image';
+import { listMasks } from '@/src/segmentation/model';
+import {
+  parseStatedColor,
+  rejectedColorsMessage,
+} from '@/src/segmentation/color';
 import { useDatasetStore } from '@/src/store/datasets';
 import { useDICOMStore } from '@/src/store/datasets-dicom';
 import { useLayersStore } from '@/src/store/datasets-layers';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { useSegmentationStore } from '@/src/segmentation/store';
+import { useSegmentStore } from '@/src/segmentation/segments';
 import { useImageCacheStore } from '@/src/store/image-cache';
-import { useMessageStore } from '@/src/store/messages';
+import { surfaceWarning, useMessageStore } from '@/src/store/messages';
 import { loadVolumeUrls } from '@/src/actions/loadUserFiles';
 
 type ResultFile = { url: string; name: string };
 
-type SegmentGroupIntent = Extract<
+type SegmentationIntent = Extract<
   KnownResultIntent,
-  { intent: 'add-segment-group' }
+  { intent: 'import-segmentation' }
 >;
 type AnnotationsIntent = Extract<
   KnownResultIntent,
@@ -58,13 +65,28 @@ const sameResultSource = (
   source.jobId === target.jobId &&
   source.outputId === target.outputId;
 
-function segmentGroupResultInScene(intent: SegmentGroupIntent): boolean {
-  const target = intent.source;
+function segmentResultInScene(
+  target: ResultSource | undefined,
+  segmentWriter: SegmentWriter
+): boolean {
   if (!target) return false;
-  return Object.values(useSegmentGroupStore().metadataByID).some(({ source }) =>
-    sameResultSource(source, target)
-  );
+  return segmentWriter
+    .resultSourcesInScene()
+    .some((source) => sameResultSource(source, target));
 }
+
+// A producer may omit `source`; minting it from the submitted job and row
+// gives a re-Load after a reload a receipt to recognize.
+const resultSourceOf = (
+  intent: SegmentationIntent | AnnotationsIntent,
+  context: SubmittedJobContext | undefined
+): ResultSource | undefined =>
+  intent.source ??
+  (context && {
+    providerId: context.providerId,
+    jobId: context.jobId,
+    outputId: intent.id,
+  });
 
 async function loadAsImport(file: ResultFile) {
   const ds = uriToDataSource(file.url, file.name);
@@ -75,51 +97,12 @@ async function loadAsImport(file: ResultFile) {
   return loaded[0] ? toDataSelection(loaded[0]) : null;
 }
 
-function applySegmentDescriptors(
-  segmentGroupID: string,
-  segments: SegmentDescriptor[]
-) {
-  const segmentGroupStore = useSegmentGroupStore();
-  segments.forEach((seg) => {
-    try {
-      segmentGroupStore.updateSegment(segmentGroupID, seg.value, {
-        name: seg.name,
-        color: seg.color,
-        ...(seg.visible == null ? {} : { visible: seg.visible }),
-      });
-    } catch (err) {
-      // Decoded segment list may not cover every value in the labelmap.
-
-      console.warn('Failed to apply segment descriptor', seg, err);
-    }
-  });
-}
-
-async function convertAndDescribe(
-  childSelection: string,
-  parentSelection: string,
-  intent: SegmentGroupIntent
-): Promise<string[]> {
-  const segmentGroupStore = useSegmentGroupStore();
-  const ids = await segmentGroupStore.convertImageToLabelmap(
-    childSelection,
-    parentSelection,
-    intent.source
-  );
-  // A seg.nrrd with embedded metadata carries no descriptors.
-  if (intent.segments?.length) {
-    ids.forEach((id) => applySegmentDescriptors(id, intent.segments!));
-  }
-  return ids;
-}
-
 // Annotation results are fully decoded and located before labels or tools are
 // mutated. Store payloads remain explicit allowlists of decoded fields.
 
 // Session-restored tools retain their result source, so that durable
 // provenance doubles as an application receipt: re-Loading a job adds nothing.
-function annotationResultInScene(intent: AnnotationsIntent): boolean {
-  const target = intent.source;
+function annotationResultInScene(target: ResultSource | undefined): boolean {
   if (!target) return false;
   return ANNOTATION_TOOL_KINDS.some((kind) =>
     Object.values(annotationToolStore(kind).toolByID).some(({ source }) =>
@@ -252,72 +235,82 @@ const prepareAnnotations = (
     ])
   ) as PreparedAnnotations;
 
-// Label identity across the boundary is the NAME, inside its own tool-kind
-// namespace: merging returns the store id a tool must point at. Only names the
-// tools actually reference are merged — a declaration nothing uses would be
-// clutter in the label picker.
-const mergeReferencedLabels = (
-  kind: AnnotationToolKind,
+// An unknown color keeps the segment's own instead of black, and is reported.
+const segmentInit = (
+  name: string,
+  style: AnnotationLabel,
+  rejected: Set<string>
+) =>
+  cleanUndefined({
+    color: parseStatedColor(name, style.color, rejected),
+    strokeWidth: style.strokeWidth,
+  });
+
+// Reported at the boundary that owns the file, naming the label and what it
+// said, the way an imported config reports the same mistake.
+const reportUnparseableColors = (rejected: Set<string>) => {
+  const message = rejectedColorsMessage('result labels', rejected);
+  if (message) useMessageStore().addError(message);
+};
+
+// Wire namespaces are per kind but bind into one registry, so the first kind to
+// bind a name sets its style. Unreferenced labels stay out of the picker.
+const bindReferencedSegments = (
   tools: readonly PreparedCore[],
-  namespace: Record<string, AnnotationLabel>
+  namespace: Record<string, AnnotationLabel>,
+  rejected: Set<string>
 ): Record<string, string> => {
-  const store = annotationToolStore(kind);
+  const { segments } = useSegmentStore();
   const names = new Set(
     tools.flatMap((tool) => (tool.labelName ? [tool.labelName] : []))
   );
-  // A merge that lands on a new name adds a label, and adding one activates it.
-  // Applying a result is not the user picking a label, so the picker is put back.
-  const activeBefore = store.activeLabel;
-  const ids = Object.fromEntries(
-    [...names].map((labelName) => [
-      labelName,
-      store.mergeLabel({ labelName, ...(namespace[labelName] ?? {}) }),
+  return Object.fromEntries(
+    [...names].map((name) => [
+      name,
+      segments.segmentNamed(
+        name,
+        segmentInit(name, namespace[name] ?? {}, rejected)
+      ),
     ])
   );
-  store.setActiveLabel(activeBefore);
-  return ids;
 };
 
-// `labelName` is deliberately NOT passed through: addTool re-derives it from
-// the label id, and passing a name without an id would silently blank it.
 const toolPayload = (
   { labelName, ...core }: PreparedCore,
-  labelIds: Record<string, string>,
+  segmentIds: Record<string, string>,
   source: ResultSource | undefined
 ) => ({
   ...core,
-  label: (labelName && labelIds[labelName]) || '',
+  segmentId: (labelName && segmentIds[labelName]) || '',
   ...(source ? { source } : {}),
 });
 
 async function applyAnnotations(
   intent: AnnotationsIntent,
-  parentSelection: string | undefined
+  parentSelection: string | undefined,
+  source: ResultSource | undefined,
+  fetchResult: FetchProcessingResult
 ): Promise<ApplyIntentOutcome> {
-  if (annotationResultInScene(intent)) return { status: 'applied' };
+  if (annotationResultInScene(source)) return { status: 'applied' };
 
   // Tools are anchored to an image; without one they would be orphans the UI
   // never shows. Opening the file as a dataset is not a fallback either — it is
   // not an image.
-  const imageMetadata = parentSelection
-    ? useImageCacheStore().getImageMetadata(parentSelection)
-    : null;
-  if (!parentSelection || !imageMetadata) {
-    return {
-      status: 'failed',
-      error: new Error(
-        "Load the job's input image before applying annotations"
-      ),
-    };
+  const imageCache = useImageCacheStore();
+  const noImage = "Load the job's input image before applying annotations";
+  if (!parentSelection || !imageCache.getImageMetadata(parentSelection)) {
+    return failed(noImage);
   }
 
-  const file = await fetchProcessingResult({
+  const file = await fetchResult({
     id: intent.id,
     name: intent.name,
     url: intent.url,
   });
   const decoded = decodeAnnotationsFile(JSON.parse(await file.text()));
 
+  const imageMetadata = imageCache.getImageMetadata(parentSelection);
+  if (!imageMetadata) return failed(noImage);
   const prepared = prepareAnnotations(
     decoded,
     parentSelection,
@@ -329,14 +322,18 @@ async function applyAnnotations(
     return { status: 'applied' };
   }
 
-  // Labels first for every kind, then the tools: a tool points at the store id
-  // its label merged to.
-  const labelIds = Object.fromEntries(
+  const rejectedColors = new Set<string>();
+  const segmentIds = Object.fromEntries(
     ANNOTATION_TOOL_KINDS.map((kind) => [
       kind,
-      mergeReferencedLabels(kind, prepared[kind], decoded.labels[kind]),
+      bindReferencedSegments(
+        prepared[kind],
+        decoded.labels[kind],
+        rejectedColors
+      ),
     ])
   ) as Record<AnnotationToolKind, Record<string, string>>;
+  reportUnparseableColors(rejectedColors);
 
   ANNOTATION_TOOL_KINDS.forEach((kind) => {
     const store = annotationToolStore(kind);
@@ -345,7 +342,7 @@ async function applyAnnotations(
       // uniform tool type does not carry the per-kind geometry keys.
       const payload = {
         ...geometry,
-        ...toolPayload(core, labelIds[kind], intent.source),
+        ...toolPayload(core, segmentIds[kind], source),
       };
       store.addTool(payload);
     });
@@ -354,94 +351,178 @@ async function applyAnnotations(
   return { status: 'applied' };
 }
 
-export async function applyIntent(
+type FetchProcessingResult = typeof fetchProcessingResult;
+
+type SegmentWriter = {
+  resultSourcesInScene: () => Array<ResultSource | undefined>;
+  convertImageToLabelmap: ReturnType<
+    typeof useSegmentationStore
+  >['convertImageToLabelmap'];
+};
+
+/**
+ * The download, import and scene-mutation edges, so a caller can drive the
+ * intent routing without a loaded scene behind it.
+ */
+export type ApplyDependencies = {
+  fetchResult: FetchProcessingResult;
+  openVolumeUrls: typeof loadVolumeUrls;
+  importVolume: (file: ResultFile) => Promise<string | null>;
+  removeDataset: (selection: string) => void;
+  addLayer: (
+    parentSelection: string,
+    childSelection: string
+  ) => Promise<string | undefined>;
+  segmentWriter: SegmentWriter;
+};
+
+export const appApplyDependencies = (): ApplyDependencies => ({
+  fetchResult: fetchProcessingResult,
+  openVolumeUrls: loadVolumeUrls,
+  importVolume: loadAsImport,
+  removeDataset: (selection) => useDatasetStore().remove(selection),
+  addLayer: (parentSelection, childSelection) =>
+    useLayersStore().addLayer(parentSelection, childSelection),
+  segmentWriter: {
+    resultSourcesInScene: () =>
+      Object.values(useSegmentationStore().segmentations)
+        .flatMap((segmentation) => listMasks(segmentation))
+        .map((mask) => mask.representations.labelmap?.source),
+    convertImageToLabelmap: (...args) =>
+      useSegmentationStore().convertImageToLabelmap(...args),
+  },
+});
+
+const failed = (message: string): ApplyIntentOutcome => ({
+  status: 'failed',
+  error: new Error(message),
+});
+
+async function openVolumeAsDataset(
+  file: ResultFile,
+  dependencies: ApplyDependencies
+): Promise<ApplyIntentOutcome> {
+  const datasetIds = await dependencies.openVolumeUrls({
+    urls: [file.url],
+    names: [file.name],
+  });
+  return datasetIds.length === 0
+    ? failed('Result did not load')
+    : { status: 'applied' };
+}
+
+async function applyLayer(
+  file: ResultFile,
+  parentSelection: string,
+  dependencies: ApplyDependencies
+): Promise<ApplyIntentOutcome> {
+  const childSelection = await dependencies.importVolume(file);
+  if (!childSelection) return failed('Result did not load');
+  // addLayer swallows build failures and resolves undefined, so the id is the only failure signal.
+  const layerId = await dependencies.addLayer(parentSelection, childSelection);
+  if (layerId) return { status: 'applied' };
+  dependencies.removeDataset(childSelection);
+  return failed('Failed to attach layer');
+}
+
+async function applySegmentation(
+  intent: SegmentationIntent,
+  parentSelection: string,
+  source: ResultSource | undefined,
+  dependencies: ApplyDependencies
+): Promise<ApplyIntentOutcome> {
+  const childSelection = await dependencies.importVolume(intent);
+  if (!childSelection) return failed('Result did not load');
+  try {
+    await dependencies.segmentWriter.convertImageToLabelmap(
+      childSelection,
+      parentSelection,
+      { source, descriptions: intent.segments }
+    );
+    return { status: 'applied' };
+  } finally {
+    // The segmentation owns its masks; the import was only a vehicle.
+    dependencies.removeDataset(childSelection);
+  }
+}
+
+async function routeIntent(
   intent: KnownResultIntent,
-  context: SubmittedJobContext | undefined
+  context: SubmittedJobContext | undefined,
+  dependencies: ApplyDependencies
 ): Promise<ApplyIntentOutcome> {
   const parentSelection = context?.activeDatasetId;
-  const openVolumeAsDatasetOutcome = async (
-    file: ResultFile
-  ): Promise<ApplyIntentOutcome> => {
-    const datasetIds = await loadVolumeUrls({
-      urls: [file.url],
-      names: [file.name],
-    });
-    if (datasetIds.length === 0)
-      return { status: 'failed', error: new Error('Result did not load') };
-    return { status: 'applied' };
-  };
-
-  try {
-    switch (intent.intent) {
-      case 'add-base-image': {
-        return await openVolumeAsDatasetOutcome(intent);
-      }
-      case 'add-layer': {
-        if (!parentSelection) {
-          return await openVolumeAsDatasetOutcome(intent);
-        }
-        const childSelection = await loadAsImport(intent);
-        if (!childSelection)
-          return { status: 'failed', error: new Error('Result did not load') };
-        // addLayer swallows build failures and resolves undefined, so the id is the only failure signal.
-        const layerId = await useLayersStore().addLayer(
-          parentSelection,
-          childSelection
-        );
-        if (!layerId) {
-          useDatasetStore().remove(childSelection);
-          return {
-            status: 'failed',
-            error: new Error('Failed to attach layer'),
-          };
-        }
+  switch (intent.intent) {
+    case 'add-base-image':
+      return openVolumeAsDataset(intent, dependencies);
+    case 'add-layer':
+      return parentSelection
+        ? applyLayer(intent, parentSelection, dependencies)
+        : openVolumeAsDataset(intent, dependencies);
+    case 'import-segmentation': {
+      // Restored masks keep their result source, so retrying Load is
+      // idempotent instead of minting duplicate segments.
+      const source = resultSourceOf(intent, context);
+      if (segmentResultInScene(source, dependencies.segmentWriter))
         return { status: 'applied' };
-      }
-      case 'add-segment-group': {
-        // Session-restored groups retain their result source. Treat that
-        // durable provenance as an application receipt so retrying Load is
-        // idempotent instead of creating a duplicate group.
-        if (segmentGroupResultInScene(intent)) return { status: 'applied' };
-        if (!parentSelection) {
-          return await openVolumeAsDatasetOutcome(intent);
-        }
-        const childSelection = await loadAsImport(intent);
-        if (!childSelection)
-          return { status: 'failed', error: new Error('Result did not load') };
-        try {
-          await convertAndDescribe(childSelection, parentSelection, intent);
-          return { status: 'applied' };
-        } finally {
-          // The group owns its own labelmap image; the import was only a vehicle.
-          useDatasetStore().remove(childSelection);
-        }
-      }
-      case 'add-annotations': {
-        return await applyAnnotations(intent, parentSelection);
-      }
-      default: {
-        const exhaustive: never = intent;
-        void exhaustive;
-        return {
-          status: 'failed',
-          error: new Error('Unsupported result intent'),
-        };
-      }
+      return parentSelection
+        ? applySegmentation(intent, parentSelection, source, dependencies)
+        : openVolumeAsDataset(intent, dependencies);
     }
+    case 'add-annotations':
+      return applyAnnotations(
+        intent,
+        parentSelection,
+        resultSourceOf(intent, context),
+        dependencies.fetchResult
+      );
+    default: {
+      const exhaustive: never = intent;
+      void exhaustive;
+      return failed('Unsupported result intent');
+    }
+  }
+}
+
+export async function applyIntent(
+  intent: KnownResultIntent,
+  context: SubmittedJobContext | undefined,
+  dependencies: ApplyDependencies = appApplyDependencies()
+): Promise<ApplyIntentOutcome> {
+  try {
+    return await routeIntent(intent, context, dependencies);
   } catch (error) {
     return { status: 'failed', error };
   }
 }
 
+// An unknown intent name means this client is too old; a known one means the
+// producer sent a payload that fails the intent's shape.
+function reportUnroutableIntent(result: ProcessingResult) {
+  if (!result.intent) return;
+  const name = currentResultIntentName(result.intent);
+  const nameIsKnown = RESULT_INTENTS.some((known) => known === name);
+  surfaceWarning(
+    `Did not load ${result.name}`,
+    nameIsKnown
+      ? `The result intent "${result.intent}" is supported, but this result does not carry the payload that intent requires, so it was rejected. The result is still available for download in the Jobs panel.`
+      : `This version cannot apply the result intent "${result.intent}". The result is still available for download in the Jobs panel.`
+  );
+}
+
 export async function autoLoadProcessingResults(
   results: ProcessingResult[],
-  context: SubmittedJobContext | undefined
+  context: SubmittedJobContext | undefined,
+  dependencies: ApplyDependencies = appApplyDependencies()
 ): Promise<{ failedResultIds: string[] }> {
   const failedResultIds: string[] = [];
   for (const result of results) {
     const intent = resultToIntent(result);
-    if (!intent) continue;
-    const outcome = await applyIntent(intent, context);
+    if (!intent) {
+      reportUnroutableIntent(result);
+      continue;
+    }
+    const outcome = await applyIntent(intent, context, dependencies);
     if (outcome.status === 'failed') {
       failedResultIds.push(result.id);
       // The completion toast already promised results.
