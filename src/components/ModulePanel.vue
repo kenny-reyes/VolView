@@ -138,8 +138,6 @@ export default defineComponent({
 #module-container {
   position: relative;
   flex: 2;
-  min-height: 0;
-  container-type: size;
   overflow: auto;
 }
 
