@@ -21,11 +21,11 @@
       </v-tabs>
     </div>
     <div id="module-container">
-      <v-window v-model="selectedModuleIndex" touchless class="fill-height">
+      <v-window v-model="selectedModuleIndex" touchless class="module-window">
         <v-window-item
           v-for="mod in modules"
           :key="mod.name"
-          class="fill-height"
+          class="module-window-item"
         >
           <component
             :key="mod.name"
@@ -139,6 +139,11 @@ export default defineComponent({
   position: relative;
   flex: 2;
   overflow: auto;
+}
+
+.module-window,
+.module-window-item {
+  min-height: 100%;
 }
 
 .module-text {
